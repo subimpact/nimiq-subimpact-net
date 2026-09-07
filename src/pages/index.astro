@@ -1,0 +1,147 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { VALIDATOR_ADDRESS } from '../config';
+import snapshot from '../data/validators.json';
+import { NetworkStats } from '../components/NetworkStats';
+import { Button } from '../components/ui/button';
+import { Badge } from '../components/ui/badge';
+import { Card, CardContent } from '../components/ui/card';
+
+const impact = snapshot.validators.find((v) => v.address.replace(/\s/g, '').includes('ACT8T0FE'));
+const totalStaked = snapshot.validators.reduce((s, v) => s + (v.balance || 0), 0);
+const totalStakers = snapshot.validators.reduce((s, v) => s + Math.max(v.stakers || 0, 0), 0);
+const zeroFee = snapshot.validators.filter((v) => v.fee === 0).length;
+
+function fmtNim(luna: number): string {
+  return (luna / 1e5).toLocaleString('en-US', { maximumFractionDigits: 0 });
+}
+function fmtPct(x: number | null): string {
+  if (x === null || x === undefined) return 'n/a';
+  return (x * 100).toFixed(2) + '%';
+}
+---
+
+<Layout>
+  <!-- Hero: split, left pitch / right live stats -->
+  <section class="mx-auto grid max-w-6xl gap-10 px-4 pt-16 pb-14 md:grid-cols-2 md:items-center md:pt-20">
+    <div>
+      <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">Nimiq validator</p>
+      <h1 class="text-4xl font-bold leading-none tracking-tighter md:text-5xl">0% fee.<br />Maximum returns.</h1>
+      <p class="mt-4 max-w-[46ch] text-base leading-relaxed text-muted-foreground">
+        ImpactZero stake keeps 0% of your rewards, runs on eco-friendly hosting, and stays online. Your NIM, your yield, no middleman.
+      </p>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <Button asChild size="lg">
+          <a href="https://nimiq.com/stake" target="_blank" rel="noopener">Stake with us</a>
+        </Button>
+        <Button asChild variant="outline" size="lg">
+          <a href="/validators/">Compare validators</a>
+        </Button>
+      </div>
+    </div>
+
+    <Card>
+      <CardContent class="px-6 py-6">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-foreground">Live network stats</h2>
+          <span class="font-mono text-xs text-muted-foreground">epoch {impact?.score?.epochNumber ?? 'n/a'}</span>
+        </div>
+        <dl class="mt-5 grid grid-cols-2 gap-4">
+          <div>
+            <dt class="text-xs text-muted-foreground">Validators</dt>
+            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{snapshot.validators.length}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-muted-foreground">Total staked</dt>
+            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{fmtNim(totalStaked)} NIM</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-muted-foreground">Stakers</dt>
+            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{totalStakers.toLocaleString()}</dd>
+          </div>
+          <div>
+            <dt class="text-xs text-muted-foreground">0% fee pools</dt>
+            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{zeroFee}</dd>
+          </div>
+        </dl>
+        <p class="mt-5 border-t border-border pt-4 font-mono text-xs text-muted-foreground">
+          Data: validators-api-mainnet.pages.dev, fetched {snapshot.fetchedAt.slice(0, 10)}
+        </p>
+      </CardContent>
+    </Card>
+  </section>
+
+  <!-- Why ImpactZero: three facts, no cards -->
+  <section class="border-t border-border/80">
+    <div class="mx-auto max-w-6xl px-4 py-14">
+      <h2 class="text-2xl font-bold tracking-tight">Why stake with ImpactZero</h2>
+      <div class="mt-8 grid gap-10 md:grid-cols-3">
+        <div>
+          <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Fee</p>
+          <p class="mt-2 text-lg font-semibold">0% forever</p>
+          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Every reward goes to you. No commission, no hidden cuts, no fee creep later.</p>
+        </div>
+        <div>
+          <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Payouts</p>
+          <p class="mt-2 text-lg font-semibold">Restake, automatic</p>
+          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Rewards are restaked automatically, compounding your position without any action.</p>
+        </div>
+        <div>
+          <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Hosting</p>
+          <p class="mt-2 text-lg font-semibold">Eco-friendly uptime</p>
+          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Efficient infrastructure keeps the node online with a small footprint.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Status -->
+  <section id="status" class="border-t border-border/80">
+    <div class="mx-auto max-w-6xl px-4 py-14">
+      <h2 class="text-2xl font-bold tracking-tight">Validator status</h2>
+      <Card class="mt-6">
+        <CardContent class="px-6 py-6">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p class="text-lg font-semibold">{impact?.name ?? 'ImpactZero stake'}</p>
+              <p class="mt-1 font-mono text-xs text-muted-foreground">{VALIDATOR_ADDRESS}</p>
+            </div>
+            <Badge variant="outline" class="border-primary/40 text-primary">listed in Nimiq Wallet</Badge>
+          </div>
+          <dl class="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div>
+              <dt class="text-xs text-muted-foreground">Fee</dt>
+              <dd class="tabular mt-1 font-mono text-xl font-semibold text-foreground">0%</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">Availability</dt>
+              <dd class="tabular mt-1 font-mono text-xl font-semibold text-foreground">{fmtPct(impact?.score?.availability)}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">Reliability</dt>
+              <dd class="tabular mt-1 font-mono text-xl font-semibold text-foreground">{fmtPct(impact?.score?.reliability)}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-muted-foreground">Self-stake</dt>
+              <dd class="tabular mt-1 font-mono text-xl font-semibold text-foreground">{fmtNim(impact?.balance ?? 0)} NIM</dd>
+            </div>
+          </dl>
+          <p class="mt-5 border-t border-border pt-4 text-sm text-muted-foreground">
+            The validator is registered and listed in the official Nimiq Validators API. Node operations are being restored; delegation remains open.
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="border-t border-border/80">
+    <div class="mx-auto max-w-6xl px-4 py-14 text-center">
+      <h2 class="text-2xl font-bold tracking-tight">Ready to stake?</h2>
+      <p class="mx-auto mt-2 max-w-[52ch] text-sm text-muted-foreground">Open the Nimiq Wallet, pick ImpactZero stake, and keep 100% of your rewards.</p>
+      <Button asChild size="lg" class="mt-6">
+        <a href="https://nimiq.com/stake" target="_blank" rel="noopener">Stake NIM</a>
+      </Button>
+    </div>
+  </section>
+</Layout>

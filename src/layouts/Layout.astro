@@ -1,0 +1,72 @@
+---
+import '../styles/global.css';
+import { SITE_TITLE, SITE_DESCRIPTION } from '../config';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{SITE_TITLE}</title>
+    <meta name="description" content={SITE_DESCRIPTION} />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href={Astro.url} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ImpactZero stake" />
+    <meta property="og:title" content={SITE_TITLE} />
+    <meta property="og:description" content={SITE_DESCRIPTION} />
+    <meta property="og:url" content={Astro.url} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={SITE_TITLE} />
+    <meta name="twitter:description" content={SITE_DESCRIPTION} />
+    <script type="application/ld+json" set:html={JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "ImpactZero stake",
+      "url": "https://nimiq.subimpact.net",
+      "description": SITE_DESCRIPTION
+    })} />
+  </head>
+  <body class="bg-zinc-950 text-zinc-100 antialiased">
+    <header class="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur">
+      <nav class="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
+        <a href="/" class="flex items-center gap-2.5">
+          <span class="flex h-7 w-7 items-center justify-center rounded-md bg-[#07c1ff] font-mono text-sm font-bold text-zinc-950">IZ</span>
+          <span class="text-sm font-semibold tracking-tight">ImpactZero stake</span>
+        </a>
+        <div class="hidden items-center gap-6 text-sm text-zinc-400 md:flex">
+          <a href="/" class="transition-colors hover:text-zinc-100">Pool</a>
+          <a href="/validators/" class="transition-colors hover:text-zinc-100">Validators</a>
+          <a href="/#status" class="transition-colors hover:text-zinc-100">Status</a>
+        </div>
+        <a href="https://nimiq.com/stake" target="_blank" rel="noopener" class="rounded-md bg-[#07c1ff] px-3.5 py-2 text-sm font-semibold text-zinc-950 transition-transform active:scale-[0.98]">Stake NIM</a>
+      </nav>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="border-t border-zinc-800/80">
+      <div class="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-8 text-sm text-zinc-500 md:flex-row md:items-center md:justify-between">
+        <p>ImpactZero stake. 0% fee, forever.</p>
+        <p class="font-mono text-xs">NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY</p>
+        <div class="flex gap-4">
+          <a href="https://t.me/subimpact" target="_blank" rel="noopener" class="transition-colors hover:text-zinc-300">Telegram</a>
+          <a href="https://x.com/subimpact" target="_blank" rel="noopener" class="transition-colors hover:text-zinc-300">X</a>
+          <a href="mailto:nim@subimpact.net" class="transition-colors hover:text-zinc-300">Email</a>
+        </div>
+      </div>
+    </footer>
+
+    <nav class="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur md:hidden">
+      <div class="grid grid-cols-3 text-center text-xs text-zinc-400">
+        <a href="/" class="py-3 transition-colors hover:text-zinc-100">Pool</a>
+        <a href="/validators/" class="py-3 transition-colors hover:text-zinc-100">Validators</a>
+        <a href="/#status" class="py-3 transition-colors hover:text-zinc-100">Status</a>
+      </div>
+    </nav>
+  </body>
+</html>
