@@ -71,7 +71,10 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
     let cancelled = false
     async function refresh() {
       try {
-        const res = await fetch("https://validators-api-main.je-cf9.workers.dev/api/v1/validators")
+        const ctrl = new AbortController()
+        const t = setTimeout(() => ctrl.abort(), 15000)
+        const res = await fetch("https://validators-api-main.je-cf9.workers.dev/api/v1/validators", { signal: ctrl.signal })
+        clearTimeout(t)
         if (!res.ok) throw new Error(String(res.status))
         const data = await res.json()
         if (cancelled) return
