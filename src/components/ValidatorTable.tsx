@@ -71,7 +71,7 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
     let cancelled = false
     async function refresh() {
       try {
-        const res = await fetch("https://validators-api-mainnet.pages.dev/api/v1/validators")
+        const res = await fetch("https://validators-api-main.je-cf9.workers.dev/api/v1/validators")
         if (!res.ok) throw new Error(String(res.status))
         const data = await res.json()
         if (cancelled) return
@@ -208,7 +208,7 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
       </div>
       <p className="mt-3 font-mono text-xs text-muted-foreground">
         {status === "live"
-          ? `Live data from validators-api-mainnet.pages.dev, updated ${lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "just now"}.`
+          ? `Live data from validators-api-main.je-cf9.workers.dev, updated ${lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "just now"}.`
           : status === "error"
             ? "Live refresh unavailable. Showing snapshot from the official API."
             : "Loading live data..."}
