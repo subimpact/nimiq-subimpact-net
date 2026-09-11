@@ -165,7 +165,16 @@ function postBroadcast(body) {
 
 // --- ChainMap paywall fixtures ---------------------------------------------
 
+// The price feeds, in the order the worker tries them. CoinGecko is primary; the two
+// exchanges exist because Cloudflare's egress is rate-limited out of CoinGecko.
 const COINGECKO_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=nimiq-2&vs_currencies=usd';
+const GATE_URL = 'https://api.gateio.ws/api/v4/spot/tickers?currency_pair=NIM_USDT';
+const MEXC_URL = 'https://api.mexc.com/api/v3/ticker/price?symbol=NIMUSDT';
+const PRICE_URLS = { coingecko: COINGECKO_URL, gate: GATE_URL, mexc: MEXC_URL };
+const PRICE_SOURCE_BY_URL = new Map(Object.entries(PRICE_URLS).map(([name, url]) => [url, name]));
+/** The order the chain must try them in — asserted, not assumed. */
+const PRICE_ORDER = ['coingecko', 'gate', 'mexc'];
+
 const PAYWALL_ADDRESS = 'NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC';
 const PAYWALL_COMPACT = PAYWALL_ADDRESS.replace(/\s+/g, '');
 // Not the deployed secret: that one is a wrangler secret and lives nowhere in this repo.
@@ -222,9 +231,45 @@ function paymentFixture(value, overrides = {}) {
 }
 
 /**
- * The paywall's two upstreams: CoinGecko's price feed and the RPC node's
- * getTransactionsByAddress. Like sendRawTransaction, the node answers HTTP 200 for a
- * request it rejected, with the detail in `error.data` (`opts.rejection`).
+ * A price, in the wire shape the named source actually sends. The string-vs-number
+ * difference is the point of these fixtures: CoinGecko quotes a JSON number, both
+ * exchanges quote a string, and the worker has to Number() them before believing them.
+ */
+function priceBody(name, price) {
+  if (name === 'coingecko') return { 'nimiq-2': { usd: price } };
+  if (name === 'gate') {
+    return [
+      {
+        currency_pair: 'NIM_USDT',
+        last: String(price),
+        lowest_ask: '0.0003938',
+        highest_bid: '0.000393',
+        change_percentage: '-0.32',
+        base_volume: '1035915',
+      },
+    ];
+  }
+  return { symbol: 'NIMUSDT', price: String(price) };
+}
+
+/** A 200 from the named source carrying no usable number — the pair went away. */
+function priceGarbageBody(name) {
+  if (name === 'coingecko') return { 'nimiq-2': {} };
+  if (name === 'gate') return [];
+  return { symbol: 'NIMUSDT' };
+}
+
+/**
+ * The paywall's upstreams: the price feeds and the RPC node's getTransactionsByAddress.
+ * Like sendRawTransaction, the node answers HTTP 200 for a request it rejected, with the
+ * detail in `error.data` (`opts.rejection`).
+ *
+ * Price behaviour is per source. `opts.price` maps a source name to what it does — a
+ * number is the price it quotes, `'fails'` is an HTTP error, `'throws'` is a connection
+ * that never opens, `'garbage'` is a 200 with no number in it. `opts.priceFails`,
+ * `priceThrows` and `priceGarbage` are the whole-chain versions: every source does that,
+ * which is the only way to reach the 502. A source with no instruction quotes
+ * `opts.priceUsd ?? PRICE_USD`.
  *
  * `opts.txs` is one page of history. `opts.pages` is the paged version — an array of
  * pages, newest first, served the way the node serves them: the first request sends
@@ -233,12 +278,22 @@ function paymentFixture(value, overrides = {}) {
  * what a node says at the end of a history.
  */
 function paywallUpstream(opts = {}) {
+  const wholeChain = opts.priceFails
+    ? 'fails'
+    : opts.priceThrows
+      ? 'throws'
+      : opts.priceGarbage
+        ? 'garbage'
+        : null;
+
   return (url, init) => {
-    if (url === COINGECKO_URL) {
-      if (opts.priceFails) return new Response('rate limited', { status: 429 });
-      if (opts.priceThrows) throw new Error('connection refused');
-      if (opts.priceGarbage) return jsonUpstream({ 'nimiq-2': {} });
-      return jsonUpstream({ 'nimiq-2': { usd: opts.priceUsd ?? PRICE_USD } });
+    const source = PRICE_SOURCE_BY_URL.get(url);
+    if (source) {
+      const behaviour = opts.price?.[source] ?? wholeChain ?? opts.priceUsd ?? PRICE_USD;
+      if (behaviour === 'fails') return new Response('rate limited', { status: 429 });
+      if (behaviour === 'throws') throw new Error('connection refused');
+      if (behaviour === 'garbage') return jsonUpstream(priceGarbageBody(source));
+      return jsonUpstream(priceBody(source, behaviour));
     }
     if (url !== RPC_URL) return new Response('not found', { status: 404 });
     const sent = JSON.parse(init.body);
@@ -384,6 +439,11 @@ function signIn(wallet, overrides = {}) {
     signature: 'signature' in overrides ? overrides.signature : wallet.sign(signInMessage(nonce)),
     nonce,
   });
+}
+
+/** The price sources this invocation called, named, in the order it called them. */
+function priceCalls() {
+  return upstreamCalls.map((entry) => PRICE_SOURCE_BY_URL.get(entry.url)).filter(Boolean);
 }
 
 /** Every getTransactionsByAddress call this invocation made, in order, as param arrays. */
@@ -1360,6 +1420,7 @@ await test('GET /api/quote -> $29.99 priced in luna at the CoinGecko rate', asyn
 
   const body = await res.json();
   assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.priceSource, 'coingecko', 'priceSource');
   assertEqual(body.usdTarget, 29.99, 'usdTarget');
   // $29.99 / $0.0004 = 74,975 NIM; x 100,000 luna = 7,497,500,000 luna.
   assertEqual(body.nimAmount, REQUIRED_NIM, 'nimAmount');
@@ -1393,14 +1454,112 @@ await test('GET /api/quote is cached (one CoinGecko call for two requests)', asy
   assertEqual((await repeat.res.json()).lunaAmount, REQUIRED_LUNA, 'cached body');
 });
 
-await test('GET /api/quote with CoinGecko failing -> 502', async () => {
+await test('GET /api/quote with every price source failing -> 502', async () => {
   for (const opts of [{ priceFails: true }, { priceThrows: true }, { priceGarbage: true }]) {
     reset();
     upstreamHandler = paywallUpstream(opts);
     const res = await call('/api/quote');
     assertEqual(res.status, 502, `status for ${JSON.stringify(opts)}`);
     assertEqual((await res.json()).error, 'upstream', `body.error for ${JSON.stringify(opts)}`);
+    // Every source has to have been given its turn before the 502 — a chain that gave up
+    // after CoinGecko would 502 here too, and would be exactly the bug this is about.
+    assertEqual(priceCalls().join(), PRICE_ORDER.join(), `sources tried for ${JSON.stringify(opts)}`);
   }
+});
+
+// --- ChainMap paywall: the price fallback chain ----------------------------
+//
+// CoinGecko rate-limits Cloudflare's egress hard enough that /api/quote, and with it
+// /api/auth/verify and /api/entitlement, 502 for everyone. These cases are the fallback:
+// Gate.io then MEXC, each tried only if the one before it gave nothing usable.
+
+await test('price chain stops at CoinGecko when CoinGecko answers', async () => {
+  upstreamHandler = paywallUpstream();
+  const body = await (await call('/api/quote')).json();
+  assertEqual(body.priceSource, 'coingecko', 'priceSource');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  // The primary is still the primary: the exchanges are never asked.
+  assertEqual(priceCalls().join(), 'coingecko', 'sources tried');
+});
+
+await test('price chain falls through to Gate.io when CoinGecko is blocked', async () => {
+  // 403 is what Cloudflare egress actually gets back from CoinGecko.
+  upstreamHandler = paywallUpstream({ price: { coingecko: 'fails', gate: 0.0004 } });
+  const res = await call('/api/quote');
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.priceSource, 'gate', 'priceSource');
+  // Gate quotes "0.0004" as a string; this is the Number() conversion being checked.
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.lunaAmount, REQUIRED_LUNA, 'lunaAmount');
+  assertEqual(body.paywallAddress, PAYWALL_ADDRESS, 'paywallAddress');
+  // Tried in order, and stopped: MEXC costs a subrequest and was not needed.
+  assertEqual(priceCalls().join(), 'coingecko,gate', 'sources tried');
+});
+
+await test('price chain falls through to MEXC when CoinGecko and Gate.io both fail', async () => {
+  upstreamHandler = paywallUpstream({
+    price: { coingecko: 'throws', gate: 'fails', mexc: 0.0004 },
+  });
+  const res = await call('/api/quote');
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.priceSource, 'mexc', 'priceSource');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.lunaAmount, REQUIRED_LUNA, 'lunaAmount');
+  assertEqual(priceCalls().join(), PRICE_ORDER.join(), 'sources tried');
+});
+
+await test('a source that answers 200 with no usable price is skipped, not trusted', async () => {
+  // The failures worth worrying about are the ones that arrive as a healthy 200: an
+  // empty ticker array, a price of "0", a price that is not a number at all. Each has
+  // to hand over to the next source rather than divide $29.99 by it.
+  for (const unusable of ['garbage', 0, '0', 'not-a-number', -0.0004]) {
+    reset();
+    upstreamHandler = paywallUpstream({
+      price: { coingecko: 'fails', gate: unusable, mexc: 0.0004 },
+    });
+    const res = await call('/api/quote');
+    const label = JSON.stringify(unusable);
+    assertEqual(res.status, 200, `status for gate quoting ${label}`);
+
+    const body = await res.json();
+    assertEqual(body.priceSource, 'mexc', `priceSource for gate quoting ${label}`);
+    assertEqual(body.priceUsd, PRICE_USD, `priceUsd for gate quoting ${label}`);
+    assertEqual(priceCalls().join(), PRICE_ORDER.join(), `sources tried for gate quoting ${label}`);
+  }
+});
+
+await test('the cached quote keeps the source that produced it', async () => {
+  upstreamHandler = paywallUpstream({ price: { coingecko: 'fails', gate: 0.0004 } });
+  await call('/api/quote');
+  const repeat = await callCounting('/api/quote');
+  assertEqual(repeat.fetches, 0, 'upstream fetches on a cache hit');
+  assertEqual((await repeat.res.json()).priceSource, 'gate', 'cached priceSource');
+});
+
+await test('/api/auth/verify prices a sign-in off the fallback when CoinGecko is blocked', async () => {
+  // The outage this chain exists for: with CoinGecko refusing Cloudflare, every signed-in
+  // wallet got a 502 out of verify, because resolveEntitlement needs a price before it can
+  // say anything. Same chain, so the answer is a pass, not an outage.
+  const wallet = makeWallet();
+  upstreamHandler = paywallUpstream({
+    price: { coingecko: 'fails', gate: 0.0004 },
+    txs: [paymentFixture(REQUIRED_LUNA, { from: wallet.address })],
+  });
+
+  const res = await signIn(wallet);
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  // The other routes report no source — /api/quote is the only one whose shape changed.
+  assertEqual('priceSource' in body, false, 'priceSource leaked into /api/auth/verify');
+  assertEqual(priceCalls().join(), 'coingecko,gate', 'sources tried');
 });
 
 // --- ChainMap sign-in: vendored BLAKE2b ------------------------------------

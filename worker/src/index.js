@@ -91,7 +91,43 @@ const HISTORY_CACHE_TTL = 60;
 const LUNA_PER_NIM = 100000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const COINGECKO_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=nimiq-2&vs_currencies=usd';
+/**
+ * Where the NIM price comes from, tried in this order until one answers with a usable
+ * number. CoinGecko is the reference rate and stays first, but it cannot be the only
+ * one: from Cloudflare's egress it is persistently rate-limited — three calls out of
+ * three refused in a live check, while the identical request from an ordinary server
+ * succeeds — and a blocked price feed takes /api/quote, /api/auth/verify and
+ * /api/entitlement down with it, since all three need a price before they can answer.
+ *
+ * The fallbacks are spot markets (NIM/USDT), not a USD volume-weighted average, so they
+ * quote a slightly different number from CoinGecko's and from each other. That is fine
+ * here: PAYMENT_TOLERANCE below accepts 85% of the asking price, which is far more drift
+ * than the spread between two live order books.
+ *
+ * Cost: one subrequest per source tried, so 3 in the worst case where the first two are
+ * down — still comfortably inside the 50-unit free budget for these routes.
+ */
+const PRICE_SOURCES = [
+  {
+    name: 'coingecko',
+    url: 'https://api.coingecko.com/api/v3/simple/price?ids=nimiq-2&vs_currencies=usd',
+    // {"nimiq-2":{"usd":0.00039309}}
+    read: (payload) => payload?.['nimiq-2']?.usd,
+  },
+  {
+    name: 'gate',
+    url: 'https://api.gateio.ws/api/v4/spot/tickers?currency_pair=NIM_USDT',
+    // [{"currency_pair":"NIM_USDT","last":"0.0003915",…}] — one ticker, price as a string
+    read: (payload) => (Array.isArray(payload) ? payload[0]?.last : undefined),
+  },
+  {
+    name: 'mexc',
+    url: 'https://api.mexc.com/api/v3/ticker/price?symbol=NIMUSDT',
+    // {"symbol":"NIMUSDT","price":"0.000389"} — price as a string
+    read: (payload) => payload?.price,
+  },
+];
+
 const USD_TARGET = 29.99;
 const QUOTE_TTL_S = 60;
 // How long the client may treat a quote as good for. NIM moves, so a quote the user
@@ -911,23 +947,38 @@ async function addressHistory(ctx, url, address) {
   return response;
 }
 
-/** NIM spot price in USD from CoinGecko; null on any failure, so callers 502 once. */
-async function fetchNimPriceUsd() {
-  let payload;
-  try {
-    const upstream = await fetch(COINGECKO_URL, {
-      method: 'GET',
-      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    });
-    if (!upstream.ok) return null;
-    payload = await upstream.json();
-  } catch {
-    return null;
+/**
+ * NIM spot price in USD, from the first source in PRICE_SOURCES that answers with one.
+ * Returns `{price, source}`, or null when every source failed, so callers 502 once.
+ *
+ * A source is skipped on any of: transport error or timeout, non-2xx, a body that is not
+ * JSON, or a quote that is not a finite number above zero. The exchanges send their price
+ * as a string, so everything goes through Number() before that check.
+ */
+async function fetchNimPrice() {
+  for (const source of PRICE_SOURCES) {
+    let payload;
+    try {
+      const upstream = await fetch(source.url, {
+        method: 'GET',
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+      if (!upstream.ok) continue;
+      payload = await upstream.json();
+    } catch {
+      continue;
+    }
+    const price = Number(source.read(payload));
+    if (Number.isFinite(price) && price > 0) return { price, source: source.name };
   }
-  const quoted = payload && typeof payload === 'object' ? payload['nimiq-2'] : null;
-  const price = quoted && typeof quoted === 'object' ? Number(quoted.usd) : NaN;
-  return Number.isFinite(price) && price > 0 ? price : null;
+  return null;
+}
+
+/** The price alone, for the callers that report no source of their own. */
+async function fetchNimPriceUsd() {
+  const quote = await fetchNimPrice();
+  return quote === null ? null : quote.price;
 }
 
 /** What $29.99 costs in luna at `priceUsd`, rounded up so the pass is never underpaid. */
@@ -938,6 +989,9 @@ function requiredLunaAt(priceUsd) {
 /**
  * The price of a pass, in the units the wallet needs. Cached for a minute: the point of
  * the tolerance downstream is that this number does not have to be exact.
+ *
+ * `priceSource` names the feed that answered, so a client — or whoever is reading the
+ * logs after CoinGecko starts refusing Cloudflare again — can see which one it was.
  */
 async function priceQuote(ctx, url, env) {
   const cache = globalThis.caches?.default;
@@ -948,13 +1002,15 @@ async function priceQuote(ctx, url, env) {
     if (hit) return hit;
   }
 
-  const priceUsd = await fetchNimPriceUsd();
-  if (priceUsd === null) return jsonResponse({ error: 'upstream' }, 502);
+  const quote = await fetchNimPrice();
+  if (quote === null) return jsonResponse({ error: 'upstream' }, 502);
 
+  const { price: priceUsd } = quote;
   const requiredLuna = requiredLunaAt(priceUsd);
   const response = jsonResponse(
     {
       priceUsd,
+      priceSource: quote.source,
       usdTarget: USD_TARGET,
       nimAmount: requiredLuna / LUNA_PER_NIM,
       lunaAmount: requiredLuna,

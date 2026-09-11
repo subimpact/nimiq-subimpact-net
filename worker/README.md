@@ -19,8 +19,10 @@ The worker whitelists a handful of GET endpoints, echoes CORS headers for known 
 | `GET /api/network`        | `/getBlockNumber` + `/getEpochNumber` + `/getBatchNumber` |
 | `GET /api/graph?part=N`   | `/getValidators` + one staker call per validator      |
 | `GET /api/history/:addr`  | `getTransactionsByAddress` on `rpc.nimiqwatch.com`    |
-| `GET /api/quote`          | CoinGecko `simple/price?ids=nimiq-2`                  |
-| `POST /api/entitlement`   | CoinGecko + `getTransactionsByAddress`                |
+| `GET /api/quote`          | price feed (CoinGecko → Gate.io → MEXC)               |
+| `GET /api/auth/nonce`     | — mints a signed challenge, no upstream call          |
+| `POST /api/auth/verify`   | price feed + `getTransactionsByAddress`               |
+| `POST /api/entitlement`   | price feed + `getTransactionsByAddress`               |
 | `GET /api/me`             | — reads the pass token, no upstream call              |
 
 `:addr` accepts a Nimiq address in any spacing or casing (`NQ08ACT8...` or
@@ -51,8 +53,8 @@ Each part is cached for 300s under its own key. Cold cost per part: 1 cache matc
 ## ChainMap paywall
 
 The ChainMap address mapper is free to depth 3 and paid beyond it. There are no accounts
-and no database: the connected wallet address is the login, and the payment transaction
-on chain is the receipt.
+and no database: a signature from the connected wallet is the login, and the payment
+transaction on chain is the receipt.
 
 `GET /api/history/:addr?max=20&startAt=<hash>` pages an address's transactions from the
 public RPC node. `max` is 1–50 (default 20); `startAt` is the node's cursor and must be a
@@ -64,41 +66,109 @@ history. A request the node rejects comes back as `400` carrying the node's own 
 an unreachable node is `502 {"error":"upstream"}`. Pages are cached 60s per
 address + `max` + `startAt`.
 
-`GET /api/quote` prices a 30-day pass: `$29.99` at the CoinGecko NIM spot rate, rounded
-up to the luna, alongside the paywall address to pay it to. Cached 60s.
+`GET /api/quote` prices a 30-day pass: `$29.99` at the NIM spot rate, rounded up to the
+luna, alongside the paywall address to pay it to, and `priceSource` naming the feed that
+answered. Cached 60s.
 
-`POST /api/entitlement` `{address}` looks for the newest transfer from that address to
-the paywall address worth at least **85%** of what the pass costs right now — tolerance
-for NIM having moved since the user signed. The 30 days run from that transaction's own
-timestamp, so a pass bought three weeks ago has a week left, not a fresh month. The
-answer is `{entitled, reason, requiredLuna, priceUsd}` plus, when entitled, a `token`.
-Origin-gated like `/api/broadcast`, and never cached.
+### Signing in
 
-`GET /api/me` with `Authorization: Bearer <token>` re-checks a pass without touching any
-upstream. The token is `base64url("<address>.<paidUntil>.<HMAC-SHA256>")` — a signed
-receipt, not a session, so nothing is stored server-side. A token we did not sign is
-`401`; a genuine token whose pass has run out is `200 {"entitled":false,"reason":"expired"}`,
-which tells the client to show *renew* rather than *connect wallet*.
+A Nimiq address proves nothing: every paid address is printed on the chain in public, so
+"I am NQ…" is a claim anyone can copy. Sign-in is therefore a signature.
+
+`GET /api/auth/nonce` returns `{nonce, message, expiresInMs}` — the challenge plus the
+exact sentence to sign. The nonce is `"<issued-at base36>.<HMAC>"`, stateless: there is no
+KV namespace and no write per sign-in, because the HMAC is what makes the timestamp
+unforgeable and a **10-minute** window is what closes the replay. `no-store` at every
+layer.
+
+`POST /api/auth/verify` `{address, signerPublicKey, signature, nonce}` verifies the
+Ed25519 signature with WebCrypto over the Hub's signed-message digest
+(`"\x16Nimiq Signed Message:\n" + byteLength + message`, SHA-256'd), then **derives** the
+address from the public key that made the signature and compares it to the claimed one —
+BLAKE2b-256 of the key, first 20 bytes, base32, IBAN check digits. The BLAKE2b is vendored
+in `src/blake2b.js` — WebCrypto has no BLAKE2, and a dependency would mean a build step
+for a file wrangler currently ships as-is — and the derivation is checked byte for byte
+against real `@nimiq/core` keypairs in the suite.
+A stale nonce, a bad signature and an address/key mismatch each get their own `401`, so
+the client can say which happened. The answer is the entitlement the chain shows —
+`{ok, entitled, authToken, requiredLuna, priceUsd, …}`, plus a pass `token` when there is
+a payment. Origin-gated, never cached.
+
+Two token kinds, both `base64url("<kind>:<address>:<expiry>.<HMAC-SHA256>")`, both
+receipts rather than sessions — nothing is stored server-side:
+
+| Kind   | Lives    | Says                                       | Accepted by         |
+| ------ | -------- | ------------------------------------------ | ------------------- |
+| `auth` | 60 min   | this key signed for this address           | `/api/entitlement`  |
+| `sub`  | to `paidUntil` (≤30 days) | the chain showed a payment | `/api/me`           |
+
+The kind is inside the signed payload, so neither can be passed off as the other. `verify`
+mints `auth` whatever the chain says — that is what lets the client poll while a payment
+confirms without a second Hub popup — and `sub` only when there is a payment.
+
+### The payment check
+
+`POST /api/entitlement` carries **no body**: the address comes from the `auth` bearer
+token and nowhere else. It looks for the newest transfer from that address to the paywall
+address worth at least **85%** of what the pass costs right now — tolerance for NIM having
+moved since the user signed. The 30 days run from that transaction's own timestamp, so a
+pass bought three weeks ago has a week left, not a fresh month. The answer is
+`{entitled, reason, requiredLuna, priceUsd}` plus, when entitled, a `sub` token.
+Origin-gated like `/api/broadcast`, and never cached — a cached answer would hand the
+first caller's pass to the next wallet that asked.
+
+The search pages back through history with `startAt`, **5 pages of 200** transactions, and
+stops early on a short page. So a payment is found anywhere in the last 1000 transactions
+of that address, at a cost of ≤6 subrequests; a wallet that has made more than 1000
+transactions since paying reads as `no_payment`.
+
+`GET /api/me` with `Authorization: Bearer <sub token>` re-checks a pass without touching
+any upstream. A token we did not sign is `401`, as is an `auth` token; a genuine `sub`
+token whose pass has run out is `200 {"entitled":false,"reason":"expired"}`, which tells
+the client to show *renew* rather than *connect wallet*.
+
+### Price sources
+
+The pass is priced in USD and paid in NIM, so every route above needs a spot price before
+it can answer. CoinGecko is the reference rate and is tried first, but it cannot be the
+only one: from Cloudflare's egress it is persistently rate-limited — three of three calls
+refused in a live check, while the identical request from an ordinary server succeeds —
+and that took `/api/quote`, `/api/auth/verify` and `/api/entitlement` down together. So
+the chain is tried in order until one returns a finite number above zero:
+
+| `priceSource` | Endpoint                                                        | Read        |
+| ------------- | --------------------------------------------------------------- | ----------- |
+| `coingecko`   | `api.coingecko.com/api/v3/simple/price?ids=nimiq-2&vs_currencies=usd` | `["nimiq-2"].usd` |
+| `gate`        | `api.gateio.ws/api/v4/spot/tickers?currency_pair=NIM_USDT`       | `[0].last`  |
+| `mexc`        | `api.mexc.com/api/v3/ticker/price?symbol=NIMUSDT`                | `.price`    |
+
+A source is skipped on a timeout (10s), a non-2xx, a body that is not JSON, or a quote
+that is not a usable number — both exchanges send the price as a *string*, so it goes
+through `Number()` before that test. All three failing is `502 {"error":"upstream"}`.
+The fallbacks are NIM/USDT spot markets rather than CoinGecko's USD average, so they
+quote a slightly different number; the 85% payment tolerance absorbs far more drift than
+the spread between two live order books. Worst case the chain costs 3 subrequests instead
+of 1, still inside the 50-unit budget.
+
+### Configuration
 
 `PAYWALL_ADDRESS` is a plain var in `wrangler.toml`. `CHAINMAP_TOKEN_SECRET` signs the
-tokens and is **not** in the repo — set it per environment with
-`npx wrangler secret put CHAINMAP_TOKEN_SECRET`. Without it both token routes answer
-`500`; rotating it invalidates every issued token, costing each holder one
-`/api/entitlement` round trip.
-
-**Known bound:** entitlement scans one 200-transaction page. A wallet that has made more
-than 200 transactions since paying would have its payment fall off the end and read as
-`no_payment`. Paginating with `startAt` until the payment is found would fix it at the
-cost of one subrequest per extra page.
+nonces and both token kinds and is **not** in the repo — set it per environment with
+`npx wrangler secret put CHAINMAP_TOKEN_SECRET`. Without it the sign-in and token routes
+answer `500`; rotating it invalidates every issued token and nonce, costing each holder
+one sign-in round trip.
 
 ## Local test
 
 ```sh
-node --check worker/src/index.js && node worker/test-local.mjs
+npm install && node --check worker/src/index.js && node worker/test-local.mjs
 ```
 
 Runs the handler in plain Node with a stubbed upstream `fetch` and an in-memory
-Cache API — no network, no wrangler needed.
+Cache API — no network, no wrangler needed. The one dependency is `@nimiq/core` from the
+repo root, and only the sign-in tests use it: address derivation and signature
+verification are checked against real keypairs, because agreeing with a fixture would only
+prove the worker agrees with itself.
 
 ## Deploy
 
