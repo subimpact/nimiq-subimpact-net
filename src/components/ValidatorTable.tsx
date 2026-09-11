@@ -209,12 +209,25 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
           </TableBody>
         </Table>
       </div>
-      <p className="mt-3 font-mono text-xs text-muted-foreground">
-        {status === "live"
-          ? `Live data from validators-api-main.je-cf9.workers.dev, updated ${lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "just now"}.`
-          : status === "error"
-            ? "Live refresh unavailable. Showing snapshot from the official API."
-            : "Loading live data..."}
+      <p className="mt-3 font-mono text-xs text-muted-foreground" data-source-line>
+        {status === "live" ? (
+          <>
+            Live data from{" "}
+            <a
+              href="https://github.com/nimiq/validators-api"
+              target="_blank"
+              rel="noopener"
+              className="underline-offset-2 hover:underline"
+            >
+              validators-api-main.je-cf9.workers.dev
+            </a>
+            , updated {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "just now"}.
+          </>
+        ) : status === "error" ? (
+          "Live refresh unavailable. Showing snapshot from the official API."
+        ) : (
+          "Loading live data..."
+        )}
       </p>
     </div>
   )

@@ -55,6 +55,14 @@ const HISTORY_BODY = JSON.stringify({
   pagination: { nextStartAt: null },
 });
 
+/** A stake big enough to exercise the compact-vs-full stat rendering. */
+const IMPACT_STAKE_LUNA = 3_512_194 * 1e5;
+const LIVE_VALIDATORS = JSON.stringify({
+  data: [{ address: SEED, name: 'ImpactZero stake', balance: IMPACT_STAKE_LUNA, numStakers: 42 }],
+  epochNumber: 1234,
+  epoch: { approxSecondsRemaining: 900 },
+});
+
 await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   const url = route.request().url();
   if (url.includes('/api/history/')) {
@@ -62,9 +70,32 @@ await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   }
   const body = url.includes('/api/graph')
     ? GRAPH_BODY
-    : JSON.stringify({ data: [], validators: [], epochNumber: 1234, epoch: { approxSecondsRemaining: 900 } });
+    : url.includes('/api/validators')
+      ? LIVE_VALIDATORS
+      : JSON.stringify({ data: [], validators: [], epochNumber: 1234, epoch: { approxSecondsRemaining: 900 } });
   route.fulfill({ status: 200, contentType: 'application/json', body });
 });
+
+// ValidatorTable talks to the upstream worker directly, not to our API host.
+// Mocked so its "Live data from …" credit line renders without the network.
+await context.route('https://validators-api-main.je-cf9.workers.dev/**', (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(
+      VALIDATORS.map((v, i) => ({
+        id: i + 1,
+        name: v.name,
+        address: v.address,
+        fee: 0,
+        payoutType: 'restake',
+        balance: v.balance,
+        stakers: v.numStakers,
+        score: { availability: 1, reliability: 1, dominance: 0.05, total: 0.9, epochNumber: 1234 },
+      })),
+    ),
+  }),
+);
 
 const page = await context.newPage();
 const errors = [];
@@ -128,6 +159,55 @@ for (const vp of VIEWPORTS) {
       );
     }
   }
+}
+
+// Stat values must not clip. Network stake runs to billions of NIM, so the hero
+// card renders a compact form (5.63B) wherever the full figure would not fit.
+// Checked at every viewport the suite already visits, plus the md two-column
+// hero at 768px, which squeezes the stat cell harder than a phone does.
+for (const width of [390, 768, 900, 1440, 1920]) {
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto(BASE + '/', { waitUntil: 'load' });
+  await page.waitForTimeout(500);
+  const stats = await page.evaluate(() =>
+    [...document.querySelectorAll('[data-stat]')].map((el) => ({
+      key: el.dataset.stat,
+      text: el.innerText.trim(),
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      lines: Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)),
+    })),
+  );
+  for (const s of stats) {
+    assert(
+      s.scrollWidth <= s.clientWidth + 1,
+      `${width}px: ${s.key} "${s.text}" not clipped (scrollWidth ${s.scrollWidth} <= clientWidth ${s.clientWidth})`,
+    );
+    // Where the compact form renders it must also be a single line — that is
+    // the whole point of it. At lg+ the full figure is deliberately back, and
+    // in the 32rem hero card "NIM" legitimately falls to a second line.
+    if (width < 1024) {
+      assert(s.lines <= 1, `${width}px: ${s.key} "${s.text}" stays on one line (${s.lines})`);
+    } else {
+      console.log(`      ${width}px: ${s.key} "${s.text}" on ${s.lines} line(s), full precision`);
+    }
+  }
+}
+
+// The API host is credited with a link to the source repo, not as bare text.
+const SOURCE_REPO = 'https://github.com/nimiq/validators-api';
+await page.setViewportSize({ width: 1440, height: 900 });
+for (const path of ['/', '/validators/']) {
+  await page.goto(BASE + path, { waitUntil: 'load' });
+  await page.waitForTimeout(600);
+  const link = page.locator(`[data-source-line] a[href="${SOURCE_REPO}"]`).first();
+  const href = await link.getAttribute('href').catch(() => null);
+  assert(href === SOURCE_REPO, `${path}: source line links to ${SOURCE_REPO} (got ${href})`);
+  const text = await link.textContent().catch(() => null);
+  assert(
+    (text || '').includes('validators-api-main.je-cf9.workers.dev'),
+    `${path}: the linked token is the API host (got ${JSON.stringify(text)})`,
+  );
 }
 
 // Shell width on desktop: the wide shells actually take the screen.

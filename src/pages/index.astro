@@ -17,6 +17,17 @@ const zeroFee = snapshot.validators.filter((v) => v.fee === 0).length;
 function fmtNim(luna: number): string {
   return (luna / 1e5).toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
+
+// Network-wide stake runs to billions of NIM, and "5,626,001,520" alone is
+// 188px at text-2xl — wider than a stat cell on a phone (155px at 390px) or in
+// the md two-column hero (142px at 768px). Compact form for those widths.
+function fmtNimCompact(luna: number): string {
+  const nim = luna / 1e5;
+  if (nim >= 1e9) return (luna / 1e14).toFixed(2) + 'B';
+  if (nim >= 1e6) return (luna / 1e11).toFixed(2) + 'M';
+  if (nim >= 1e3) return (luna / 1e8).toFixed(1) + 'k';
+  return fmtNim(luna);
+}
 ---
 
 <Layout>
@@ -47,25 +58,35 @@ function fmtNim(luna: number): string {
           <span class="font-mono text-xs text-muted-foreground">epoch {impact?.score?.epochNumber ?? 'n/a'}</span>
         </div>
         <dl class="mt-5 grid grid-cols-2 gap-4">
-          <div>
+          <div class="min-w-0">
             <dt class="text-xs text-muted-foreground">Validators</dt>
             <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{snapshot.validators.length}</dd>
           </div>
-          <div>
+          <div class="min-w-0">
             <dt class="text-xs text-muted-foreground">Total staked</dt>
-            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{fmtNim(totalStaked)} NIM</dd>
+            <!-- Full precision only where the cell is actually wide enough:
+                 sm–md (hero still one column) and lg+ (hero split, but the
+                 shell is wide again). Compact below sm and across md, where
+                 the two-column hero squeezes the card to ~142px. -->
+            <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground" data-stat="total-staked">
+              <span class="sm:hidden md:inline lg:hidden">{fmtNimCompact(totalStaked)} NIM</span><span class="hidden sm:inline md:hidden lg:inline">{fmtNim(totalStaked)} NIM</span>
+            </dd>
           </div>
-          <div>
+          <div class="min-w-0">
             <dt class="text-xs text-muted-foreground">Stakers</dt>
             <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{totalStakers.toLocaleString()}</dd>
           </div>
-          <div>
+          <div class="min-w-0">
             <dt class="text-xs text-muted-foreground">0% fee pools</dt>
             <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{zeroFee}</dd>
           </div>
         </dl>
-        <p class="mt-5 border-t border-border pt-4 font-mono text-xs text-muted-foreground">
-          Data: validators-api-main.je-cf9.workers.dev, fetched {snapshot.fetchedAt.slice(0, 10)}
+        <p class="mt-5 border-t border-border pt-4 font-mono text-xs text-muted-foreground" data-source-line>
+          Data: <a
+            href="https://github.com/nimiq/validators-api"
+            target="_blank"
+            rel="noopener"
+            class="underline-offset-2 hover:underline">validators-api-main.je-cf9.workers.dev</a>, fetched {snapshot.fetchedAt.slice(0, 10)}
         </p>
       </CardContent>
     </Card>

@@ -38,6 +38,16 @@ function nim(luna: number): string {
   return (luna / 1e5).toLocaleString("en-US", { maximumFractionDigits: 0 })
 }
 
+// Same problem as the hero stat card: a 7-digit NIM figure needs more room than
+// a tile gets on a narrow phone, or in the 4-up grid between md and lg.
+function nimCompact(luna: number): string {
+  const value = luna / 1e5
+  if (value >= 1e9) return (luna / 1e14).toFixed(2) + "B"
+  if (value >= 1e6) return (luna / 1e11).toFixed(2) + "M"
+  if (value >= 1e3) return (luna / 1e8).toFixed(1) + "k"
+  return nim(luna)
+}
+
 function countdown(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds))
   const hours = Math.floor(total / 3600)
@@ -58,12 +68,15 @@ async function getJson<T>(path: string): Promise<T> {
   }
 }
 
-function Stat({ label, children }: { label: string; children: ReactNode }) {
+function Stat({ label, value, children }: { label: string; value?: string; children: ReactNode }) {
   return (
-    <Card size="sm">
+    <Card size="sm" className="min-w-0">
       <CardContent className="px-4 py-4">
         <p className="text-xs text-muted-foreground">{label}</p>
-        <div className="mt-1 font-mono text-xl font-semibold tabular-nums text-foreground">
+        <div
+          className="mt-1 font-mono text-xl font-semibold tabular-nums text-foreground"
+          data-stat={value}
+        >
           {children}
         </div>
       </CardContent>
@@ -134,7 +147,12 @@ export function LiveStats({ initialStake, initialStakers, initialEpoch }: LiveSt
   return (
     <div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <Stat label="Total stake">{nim(stake)} NIM</Stat>
+        {/* Compact below sm and across md, where the grid goes 4-up and each
+            tile drops to ~124px — the same two windows the hero card uses. */}
+        <Stat label="Total stake" value="total-stake">
+          <span className="sm:hidden md:inline lg:hidden">{nimCompact(stake)} NIM</span>
+          <span className="hidden sm:inline md:hidden lg:inline">{nim(stake)} NIM</span>
+        </Stat>
         <Stat label="Stakers">{stakers >= 0 ? stakers.toLocaleString("en-US") : "n/a"}</Stat>
         <Stat label="Next election">
           {seconds === null ? pending("w-20") : countdown(seconds)}
