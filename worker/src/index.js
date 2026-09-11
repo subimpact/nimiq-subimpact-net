@@ -18,6 +18,10 @@ const USER_AGENT = 'nimiq-api/1.0 (+https://nimiq.subimpact.net)';
 const UPSTREAM_TIMEOUT_MS = 10000;
 const CACHE_TTL = 60;
 
+// Albatross: 720 batches per epoch, one batch roughly every 60s.
+const BATCHES_PER_EPOCH = 720;
+const SECONDS_PER_BATCH = 60;
+
 // Nimiq addresses are NQ + 34 base32 characters (36 total), i.e. 9 four-char blocks.
 const ADDRESS_RE = /^NQ[A-Z0-9]{34}$/i;
 
@@ -47,6 +51,10 @@ export default {
 
     if (segments.length === 2 && segments[1] === 'validators') {
       return withHeaders(await proxy(request, ctx, url, '/getValidators'), cors);
+    }
+
+    if (segments.length === 2 && segments[1] === 'network') {
+      return withHeaders(await networkSummary(ctx, url), cors);
     }
 
     if (segments.length === 3 && (segments[1] === 'stakers' || segments[1] === 'account')) {
@@ -121,6 +129,87 @@ function normalizeAddress(raw) {
   const compact = String(raw || '').replace(/\s+/g, '');
   if (!ADDRESS_RE.test(compact)) return null;
   return (compact.toUpperCase().match(/.{1,4}/g) || []).join(' ');
+}
+
+/** GET JSON from NimiqHub; throws on transport error, non-2xx, or unparseable body. */
+async function fetchUpstreamJson(upstreamPath) {
+  const response = await fetch(`${UPSTREAM}${upstreamPath}`, {
+    method: 'GET',
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`upstream ${response.status}`);
+  return response.json();
+}
+
+/**
+ * NimiqHub wraps these counters inconsistently: `{blockNumber: n}` from one endpoint,
+ * `{epochNumber: {data: n}}` from the next. Returns null when no number is present.
+ */
+function unwrapNumber(payload, key) {
+  const raw = payload && typeof payload === 'object' ? payload[key] : undefined;
+  const value = raw && typeof raw === 'object' ? raw.data : raw;
+  const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(num) ? Math.trunc(num) : null;
+}
+
+/**
+ * Chain head as one payload: block, epoch, batch, plus how far the current epoch has
+ * run. Cached like `proxy`, but the body is derived rather than passed through.
+ */
+async function networkSummary(ctx, cacheUrl) {
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  let payloads;
+  try {
+    payloads = await Promise.all([
+      fetchUpstreamJson('/getBlockNumber'),
+      fetchUpstreamJson('/getEpochNumber'),
+      fetchUpstreamJson('/getBatchNumber'),
+    ]);
+  } catch {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  const blockNumber = unwrapNumber(payloads[0], 'blockNumber');
+  const epochNumber = unwrapNumber(payloads[1], 'epochNumber');
+  const batchNumber = unwrapNumber(payloads[2], 'batchNumber');
+
+  if (blockNumber === null || epochNumber === null || batchNumber === null) {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  const batchInEpoch = batchNumber % BATCHES_PER_EPOCH;
+  const batchesRemaining = BATCHES_PER_EPOCH - batchInEpoch;
+
+  const response = jsonResponse(
+    {
+      blockNumber,
+      epochNumber,
+      batchNumber,
+      epoch: {
+        batchInEpoch,
+        batchesRemaining,
+        approxSecondsRemaining: batchesRemaining * SECONDS_PER_BATCH,
+      },
+    },
+    200,
+    cacheControl(),
+  );
+
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+
+  return response;
 }
 
 /**

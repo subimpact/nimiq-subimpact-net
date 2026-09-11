@@ -18,6 +18,21 @@ const EXPECTED_UPSTREAM_ADDRESS =
 
 // --- stubs -----------------------------------------------------------------
 
+function jsonUpstream(body) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+/** Canned NimiqHub chain-head responses, in the three shapes the API actually returns. */
+function networkUpstream(url) {
+  if (url.endsWith('/getBlockNumber')) return jsonUpstream({ blockNumber: 61307037, metadata: null });
+  if (url.endsWith('/getEpochNumber')) return jsonUpstream({ epochNumber: { data: 1340, metadata: null } });
+  if (url.endsWith('/getBatchNumber')) return jsonUpstream({ batchNumber: 964184, metadata: null });
+  return new Response('not found', { status: 404 });
+}
+
 /** Records every upstream call; returns a canned JSON body. */
 const upstreamCalls = [];
 let upstreamHandler = () =>
@@ -159,6 +174,53 @@ await test('GET /api/validators -> getValidators', async () => {
   const res = await call('/api/validators');
   assertEqual(res.status, 200, 'status');
   assertEqual(upstreamCalls[0].url, 'https://api.nimiqhub.com/getValidators', 'upstream URL');
+});
+
+await test('GET /api/network -> normalized counters + epoch math', async () => {
+  upstreamHandler = networkUpstream;
+  const res = await call('/api/network');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, 3, 'upstream call count');
+  assert(
+    ['/getBlockNumber', '/getEpochNumber', '/getBatchNumber'].every((path) =>
+      upstreamCalls.some((c) => c.url === `https://api.nimiqhub.com${path}`),
+    ),
+    `upstream URLs: got ${upstreamCalls.map((c) => c.url).join(', ')}`,
+  );
+  const body = await res.json();
+  assertEqual(body.blockNumber, 61307037, 'blockNumber');
+  assertEqual(body.epochNumber, 1340, 'epochNumber (unwrapped from .data)');
+  assertEqual(body.batchNumber, 964184, 'batchNumber');
+  assertEqual(body.epoch.batchInEpoch, 104, 'epoch.batchInEpoch');
+  assertEqual(body.epoch.batchesRemaining, 616, 'epoch.batchesRemaining');
+  assertEqual(body.epoch.approxSecondsRemaining, 36960, 'epoch.approxSecondsRemaining');
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('GET /api/network is cached (three upstream calls for two requests)', async () => {
+  upstreamHandler = networkUpstream;
+  await call('/api/network');
+  const res = await call('/api/network');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, 3, 'upstream call count');
+  assertEqual((await res.json()).epochNumber, 1340, 'cached body');
+});
+
+await test('GET /api/network with one upstream failing -> 502', async () => {
+  upstreamHandler = (url) =>
+    url.endsWith('/getBatchNumber') ? new Response('boom', { status: 500 }) : networkUpstream(url);
+  const res = await call('/api/network');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('GET /api/network with a missing counter -> 502', async () => {
+  upstreamHandler = (url) =>
+    url.endsWith('/getEpochNumber') ? jsonUpstream({ metadata: null }) : networkUpstream(url);
+  const res = await call('/api/network');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
 });
 
 await test('bad address -> 400 {"error":"invalid address"}', async () => {
