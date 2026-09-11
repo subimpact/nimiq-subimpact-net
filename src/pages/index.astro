@@ -86,7 +86,10 @@ function fmtNimCompact(luna: number): string {
             <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground">{zeroFee}</dd>
           </div>
         </dl>
-        <p class="mt-5 border-t border-border pt-4 font-mono text-xs text-muted-foreground" data-source-line>
+        <!-- hyphens-auto: this credit line is the one place on the page where a
+             long prose run wraps inside a narrow card, so let the browser
+             hyphenate rather than leave a ragged short last line. -->
+        <p class="mt-5 border-t border-border pt-4 font-mono text-xs text-muted-foreground hyphens-auto" data-source-line>
           Data: <a
             href="https://github.com/nimiq/validators-api"
             target="_blank"

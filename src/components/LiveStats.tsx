@@ -148,10 +148,13 @@ export function LiveStats({ initialStake, initialStakers, initialEpoch }: LiveSt
     <div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {/* Compact below sm and across md, where the grid goes 4-up and each
-            tile drops to ~124px — the same two windows the hero card uses. */}
+            tile drops to ~124px — the same two windows the hero card uses.
+            At lg+ the unit drops to text-base to match the hero card, which
+            already renders its "NIM" a step down from the figure. The ~288px
+            cell fits the pair either way, so this is consistency, not room. */}
         <Stat label="Total stake" value="total-stake">
           <span className="sm:hidden md:inline lg:hidden">{nimCompact(stake)} NIM</span>
-          <span className="hidden sm:inline md:hidden lg:inline">{nim(stake)} NIM</span>
+          <span className="hidden sm:inline md:hidden lg:inline">{nim(stake)}</span><span className="hidden sm:inline md:hidden lg:inline lg:text-base"> NIM</span>
         </Stat>
         <Stat label="Stakers">{stakers >= 0 ? stakers.toLocaleString("en-US") : "n/a"}</Stat>
         <Stat label="Next election">
