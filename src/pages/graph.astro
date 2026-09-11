@@ -1,0 +1,50 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { DelegationGraph } from '../components/DelegationGraph';
+
+const title = 'Nimiq delegation map — ImpactZero stake';
+const description =
+  'An interactive map of the Nimiq staking ecosystem: every validator and every staker, drawn live from on-chain data. Node size is stake, edges are delegation.';
+---
+
+<Layout title={title} description={description}>
+  <section class="mx-auto max-w-6xl px-4 pt-12 pb-24 md:pb-16">
+    <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">Network map</p>
+    <h1 class="text-3xl font-bold tracking-tight md:text-4xl">Delegation map</h1>
+    <p class="mt-3 max-w-[62ch] text-sm leading-relaxed text-muted-foreground">
+      Every Nimiq validator and every address delegating to one, laid out as a force-directed
+      hex map. Each hub is a validator, each satellite a staker, each edge a live delegation.
+      Hex area follows stake on a square-root scale. Nothing here is sampled or simulated —
+      the whole map is composed on request from NimiqHub chain data.
+    </p>
+
+    <div class="mt-8">
+      <DelegationGraph client:load />
+    </div>
+
+    <div class="mt-10 grid gap-8 border-t border-border pt-8 md:grid-cols-3">
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Reading it</p>
+        <p class="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Clusters are validators. A tight ring of satellites means many small delegators; a
+          single large satellite beside a hub means one address carries the pool.
+        </p>
+      </div>
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Controls</p>
+        <p class="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Drag to pan, scroll or pinch to zoom, drag a hex to pull it out of the pile. Search
+          matches any fragment of an address or a validator name.
+        </p>
+      </div>
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Source</p>
+        <p class="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Validators and staker lists come from NimiqHub through
+          <span class="font-mono text-foreground">nimiq-api.subimpact.net</span>, cached five
+          minutes. Validator names are matched against the official validators API.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>

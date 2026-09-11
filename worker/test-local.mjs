@@ -16,6 +16,13 @@ const ADDRESS_ENCODED = encodeURIComponent(ADDRESS);
 const EXPECTED_UPSTREAM_ADDRESS =
   'NQ08%20ACT8%20T0FE%20PTG8%20P5RL%20H2S3%20QGXH%20V15R%20NVXY';
 
+// /api/graph fixtures: two validators, the first with two stakers.
+const VALIDATOR_A = ADDRESS;
+const VALIDATOR_B = 'NQ97 04UL PBTY 3P4R TARV G303 K713 FNNY 4J3Y';
+const STAKER_A1 = 'NQ27 NCB1 3CYU 9P4L EM2V D7L2 28QE 36PA EXB1';
+const STAKER_A2 = 'NQ16 085S 7JNP YJNY UA5N G5Y5 B98N 0JT7 6GKB';
+const NAMES_URL = 'https://validators-api-main.je-cf9.workers.dev/api/v1/validators';
+
 // --- stubs -----------------------------------------------------------------
 
 function jsonUpstream(body) {
@@ -31,6 +38,46 @@ function networkUpstream(url) {
   if (url.endsWith('/getEpochNumber')) return jsonUpstream({ epochNumber: { data: 1340, metadata: null } });
   if (url.endsWith('/getBatchNumber')) return jsonUpstream({ batchNumber: 964184, metadata: null });
   return new Response('not found', { status: 404 });
+}
+
+function stakersPath(address) {
+  return `/getStakersByValidatorAddress/${encodeURIComponent(address)}`;
+}
+
+/**
+ * Canned NimiqHub + validator-names responses for /api/graph.
+ * `opts.bStakers` sets validator B's reported staker count; `opts.bFails` makes its
+ * staker call return 500; otherwise B's list comes back empty.
+ */
+function graphUpstream(opts = {}) {
+  return (url) => {
+    if (url.endsWith('/getValidators')) {
+      return jsonUpstream({
+        data: [
+          { address: VALIDATOR_A, balance: 300000000, numStakers: 2 },
+          { address: VALIDATOR_B, balance: 100000000, numStakers: opts.bStakers ?? 0 },
+        ],
+        metadata: null,
+      });
+    }
+    if (url.endsWith(stakersPath(VALIDATOR_A))) {
+      return jsonUpstream({
+        data: [
+          { address: STAKER_A1, balance: 200000000, delegation: VALIDATOR_A },
+          { address: STAKER_A2, balance: 50000000, delegation: VALIDATOR_A },
+        ],
+        metadata: null,
+      });
+    }
+    if (url.endsWith(stakersPath(VALIDATOR_B))) {
+      if (opts.bFails) return new Response('boom', { status: 500 });
+      return jsonUpstream({ data: [], metadata: null });
+    }
+    if (url === NAMES_URL) {
+      return jsonUpstream([{ id: 1, name: 'ImpactZero stake', address: VALIDATOR_A, fee: 0 }]);
+    }
+    return new Response('not found', { status: 404 });
+  };
 }
 
 /** Records every upstream call; returns a canned JSON body. */
@@ -221,6 +268,102 @@ await test('GET /api/network with a missing counter -> 502', async () => {
   const res = await call('/api/network');
   assertEqual(res.status, 502, 'status');
   assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('GET /api/graph -> composed validators + stakers', async () => {
+  upstreamHandler = graphUpstream();
+  const res = await call('/api/graph');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=300', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+
+  const body = await res.json();
+  assertEqual(body.validators.length, 2, 'validator count');
+  assertEqual(body.totalActiveStake, 400000000, 'totalActiveStake');
+  assert(!Number.isNaN(Date.parse(body.updatedAt)), `updatedAt: got ${body.updatedAt}`);
+
+  const [a, b] = body.validators;
+  assertEqual(a.address, VALIDATOR_A, 'validators[0].address');
+  assertEqual(a.name, 'ImpactZero stake', 'validators[0].name (enriched)');
+  assertEqual(a.balance, 300000000, 'validators[0].balance');
+  assertEqual(a.numStakers, 2, 'validators[0].numStakers');
+  assertEqual(a.stakeShare, 0.75, 'validators[0].stakeShare');
+  assertEqual(b.address, VALIDATOR_B, 'validators[1].address');
+  assertEqual(b.name, undefined, 'validators[1].name (no match)');
+  assertEqual(b.stakeShare, 0.25, 'validators[1].stakeShare');
+
+  assertEqual(body.stakers.length, 2, 'staker count');
+  assertEqual(body.stakers[0].address, STAKER_A1, 'stakers[0].address');
+  assertEqual(body.stakers[0].validatorAddress, VALIDATOR_A, 'stakers[0].validatorAddress');
+  assertEqual(body.stakers[0].balance, 200000000, 'stakers[0].balance');
+  assertEqual(body.stakers[1].address, STAKER_A2, 'stakers[1].address');
+
+  // A validator reporting zero stakers costs no upstream round trip.
+  assert(
+    !upstreamCalls.some((c) => c.url.endsWith(stakersPath(VALIDATOR_B))),
+    'fetched stakers for a validator that reports none',
+  );
+  assertEqual(upstreamCalls.length, 3, 'upstream call count (validators + names + one staker list)');
+});
+
+await test('GET /api/graph with an empty staker list -> validator kept, no stakers', async () => {
+  upstreamHandler = graphUpstream({ bStakers: 3 });
+  const res = await call('/api/graph');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.validators.length, 2, 'validator count');
+  assertEqual(body.validators[1].numStakers, 3, 'validators[1].numStakers (as reported)');
+  assertEqual(body.stakers.length, 2, 'staker count');
+  assert(
+    body.stakers.every((s) => s.validatorAddress === VALIDATOR_A),
+    'stakers attributed to the wrong validator',
+  );
+  assert(
+    upstreamCalls.some((c) => c.url.endsWith(stakersPath(VALIDATOR_B))),
+    'expected a staker call for a validator reporting stakers',
+  );
+});
+
+await test('GET /api/graph with one staker fetch failing -> 200, that validator has no stakers', async () => {
+  upstreamHandler = graphUpstream({ bStakers: 3, bFails: true });
+  const res = await call('/api/graph');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.validators.length, 2, 'validator count');
+  assertEqual(body.validators[1].address, VALIDATOR_B, 'failed validator still listed');
+  assertEqual(body.stakers.length, 2, 'staker count (only validator A contributed)');
+  assert(
+    body.stakers.every((s) => s.validatorAddress === VALIDATOR_A),
+    'stakers attributed to the wrong validator',
+  );
+});
+
+await test('GET /api/graph with /getValidators failing -> 502', async () => {
+  upstreamHandler = (url) =>
+    url.endsWith('/getValidators') ? new Response('boom', { status: 500 }) : graphUpstream()(url);
+  const res = await call('/api/graph');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('GET /api/graph is cached (no extra upstream calls on the second request)', async () => {
+  upstreamHandler = graphUpstream();
+  await call('/api/graph');
+  const before = upstreamCalls.length;
+  const res = await call('/api/graph');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, before, 'upstream call count');
+  assertEqual((await res.json()).totalActiveStake, 400000000, 'cached body');
+});
+
+await test('GET /api/graph survives a missing validator-names API', async () => {
+  upstreamHandler = (url) => (url === NAMES_URL ? new Response('nope', { status: 503 }) : graphUpstream()(url));
+  const res = await call('/api/graph');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.validators.length, 2, 'validator count');
+  assertEqual(body.validators[0].name, undefined, 'no name when enrichment fails');
+  assertEqual(body.stakers.length, 2, 'staker count');
 });
 
 await test('bad address -> 400 {"error":"invalid address"}', async () => {
