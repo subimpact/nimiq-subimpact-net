@@ -544,6 +544,58 @@ function bulkGraphUpstream(opts = {}) {
   };
 }
 
+// --- /api/status fixtures (Uptime Kuma) ------------------------------------
+
+const KUMA_URL = 'https://uptime.subimpact.net/api/status-page/heartbeat/live';
+// 2026-09-11 14:44:44.086 UTC — a real beat time off the live status page, kept to
+// the millisecond so the route is shown to carry those through.
+const KUMA_START = Date.UTC(2026, 8, 11, 14, 44, 44, 86);
+const KUMA_UPTIME_28 = 0.9971530249110321;
+
+/**
+ * `count` beats a minute apart, oldest → newest, timed the way Kuma actually writes
+ * them: `2026-09-11 14:44:44.086`, no zone marker, UTC meant. The route has to append
+ * the `Z` itself, so a fixture in ISO form would test nothing.
+ */
+function kumaBeats(count, { ping = 100, lastPing = ping, downAt = [] } = {}) {
+  const beats = Array.from({ length: count }, (_, i) => ({
+    status: downAt.includes(i) ? 0 : 1,
+    time: new Date(KUMA_START + i * 60_000).toISOString().replace('T', ' ').replace('Z', ''),
+    msg: '',
+    ping,
+  }));
+  if (beats.length > 0) beats[beats.length - 1].ping = lastPing;
+  return beats;
+}
+
+/**
+ * A status-page payload. Monitor 28 gets 120 beats so the ≤100 trim is exercised, and
+ * one of its down beats sits at index 25 — inside the window that survives, so a trim
+ * that kept the *oldest* 100 would lose it.
+ */
+function kumaPayload(opts = {}) {
+  const heartbeatList = {};
+  const uptimeList = {};
+  // The live page lists every service the operator runs; id 1 stands in for the rest
+  // and must not reach /api/status.
+  heartbeatList['1'] = kumaBeats(3, { ping: 93 });
+  uptimeList['1_24'] = 1;
+  if (!opts.dropValidator) {
+    heartbeatList['28'] = kumaBeats(120, { ping: 40, lastPing: 12, downAt: [0, 25] });
+    uptimeList['28_24'] = KUMA_UPTIME_28;
+  }
+  if (!opts.dropWebsite) {
+    heartbeatList['27'] = kumaBeats(4, { ping: 150, lastPing: 137 });
+    if (!opts.dropWebsiteUptime) uptimeList['27_24'] = 1;
+  }
+  return { heartbeatList, uptimeList };
+}
+
+function kumaUpstream(opts = {}) {
+  return (url) =>
+    url === KUMA_URL ? jsonUpstream(kumaPayload(opts)) : new Response('not found', { status: 404 });
+}
+
 /** Records every upstream call; returns a canned JSON body. */
 const upstreamCalls = [];
 let upstreamHandler = () =>
@@ -1248,6 +1300,121 @@ await test('GET /api/graph survives a missing validator-names API', async () => 
   assertEqual(body.validators.length, 2, 'validator count');
   assertEqual(body.validators[0].name, undefined, 'no name when enrichment fails');
   assertEqual(body.stakers.length, 2, 'staker count');
+});
+
+// --- /api/status (Uptime Kuma) ---------------------------------------------
+
+await test('GET /api/status -> only monitors 28 and 27, in that order', async () => {
+  upstreamHandler = kumaUpstream();
+  const res = await call('/api/status');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(upstreamCalls[0].url, KUMA_URL, 'upstream url');
+  assertEqual(body.source, 'uptime.subimpact.net', 'source');
+  assertEqual(body.sourceUrl, 'https://uptime.subimpact.net/status/live', 'sourceUrl');
+  assert(Number.isFinite(body.fetchedAt) && body.fetchedAt > 0, 'fetchedAt is a timestamp');
+  assertEqual(body.monitors.length, 2, 'monitor count (id 1 is not ours)');
+  assertEqual(
+    body.monitors.map((m) => m.id).join(','),
+    '28,27',
+    'monitor order: the validator first',
+  );
+  assertEqual(body.monitors[0].label, 'Validator node · p2p 8443', 'label 28');
+  assertEqual(body.monitors[1].label, 'Website', 'label 27');
+
+  const node = body.monitors[0];
+  assertEqual(node.status, 1, 'status from the newest beat');
+  assertEqual(node.ping, 12, 'ping from the newest beat');
+  assertEqual(node.uptime24h, KUMA_UPTIME_28, 'uptime24h from uptimeList["28_24"]');
+  // 120 fixture beats, trimmed to the newest 100: the window starts at index 20, so
+  // the down beat at index 25 lands at position 5 and the one at index 0 is gone.
+  assertEqual(node.heartbeats.length, 100, 'heartbeats capped at 100');
+  assertEqual(node.heartbeats[5], 0, 'the newest 100 were kept (down beat at index 25)');
+  assertEqual(node.heartbeats.filter((s) => s === 0).length, 1, 'only the surviving down beat');
+  assertEqual(node.heartbeats[node.heartbeats.length - 1], node.status, 'oldest -> newest');
+  // Beat 119 of a run starting 14:44:44.086 UTC, one a minute.
+  assertEqual(node.lastCheck, '2026-09-11T16:43:44.086Z', 'lastCheck parsed as UTC');
+
+  const site = body.monitors[1];
+  assertEqual(site.ping, 137, 'ping 27');
+  assertEqual(site.uptime24h, 1, 'uptime24h 27');
+  assertEqual(site.heartbeats.length, 4, 'short beat lists pass through whole');
+  assertEqual(site.lastCheck, '2026-09-11T14:47:44.086Z', 'lastCheck 27');
+  note(`normalized: ${JSON.stringify({ ...body, monitors: body.monitors.map((m) => ({ ...m, heartbeats: `[${m.heartbeats.length} ints]` })) })}`);
+});
+
+await test('GET /api/status with Kuma down -> 502, retried once', async () => {
+  upstreamHandler = () => new Response('bad gateway', { status: 500 });
+  const res = await call('/api/status');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+  assertEqual(upstreamCalls.length, 2, 'attempts (bounded retry, not a loop)');
+});
+
+await test('GET /api/status with Kuma unreachable -> 502', async () => {
+  upstreamHandler = () => {
+    throw new Error('timed out');
+  };
+  const res = await call('/api/status');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+  assertEqual(upstreamCalls.length, 2, 'attempts');
+});
+
+await test('GET /api/status with a 200 that is not JSON -> 502', async () => {
+  // What a reverse proxy in front of Kuma serves: a success code over an error page.
+  upstreamHandler = () =>
+    new Response('<html>502 Bad Gateway</html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    });
+  const res = await call('/api/status');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('GET /api/status with monitor 28 missing -> 200 with the one monitor left', async () => {
+  upstreamHandler = kumaUpstream({ dropValidator: true });
+  const res = await call('/api/status');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.monitors.length, 1, 'monitor count');
+  assertEqual(body.monitors[0].id, 27, 'the surviving monitor');
+  assertEqual(body.monitors[0].label, 'Website', 'label');
+});
+
+await test('GET /api/status with both monitors gone -> 200 with an empty list', async () => {
+  upstreamHandler = kumaUpstream({ dropValidator: true, dropWebsite: true });
+  const res = await call('/api/status');
+  assertEqual(res.status, 200, 'status');
+  assertEqual((await res.json()).monitors.length, 0, 'monitor count');
+});
+
+await test('GET /api/status with no uptime figure -> uptime24h null, row kept', async () => {
+  upstreamHandler = kumaUpstream({ dropValidator: true, dropWebsiteUptime: true });
+  const res = await call('/api/status');
+  const body = await res.json();
+  assertEqual(body.monitors.length, 1, 'monitor count');
+  assertEqual(body.monitors[0].uptime24h, null, 'uptime24h');
+  assertEqual(body.monitors[0].status, 1, 'status still read from the beats');
+});
+
+await test('GET /api/status is cached (one upstream call for two requests)', async () => {
+  upstreamHandler = kumaUpstream();
+  await call('/api/status');
+  const res = await call('/api/status');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, 1, 'upstream call count');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO on cached response');
+  assertEqual((await res.json()).monitors.length, 2, 'cached body');
+});
+
+await test('GET /api/status from a disallowed origin -> no CORS headers', async () => {
+  upstreamHandler = kumaUpstream();
+  const res = await call('/api/status', { headers: { Origin: 'https://evil.example' } });
+  assertEqual(res.status, 200, 'status');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), null, 'ACAO');
+  assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
 });
 
 // --- ChainMap paywall: /api/history ----------------------------------------

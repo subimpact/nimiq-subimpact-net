@@ -63,10 +63,37 @@ const LIVE_VALIDATORS = JSON.stringify({
   epoch: { approxSecondsRemaining: 900 },
 });
 
+/**
+ * A full /api/status payload: both monitors, the 100 beats the worker can send, and a
+ * label long enough to be the one that would overflow a 390px card if anything did.
+ * Two down beats sit inside the newest 30 so the mobile window is not all one colour.
+ */
+const STATUS_BEATS = Array.from({ length: 100 }, (_, i) => (i === 80 || i === 95 ? 0 : 1));
+const STATUS_BODY = JSON.stringify({
+  fetchedAt: Date.now() - 4000,
+  source: 'uptime.subimpact.net',
+  sourceUrl: 'https://uptime.subimpact.net/status/live',
+  monitors: [
+    {
+      id: 28, label: 'Validator node · p2p 8443', status: 1, ping: 12,
+      lastCheck: new Date(Date.now() - 38000).toISOString(),
+      uptime24h: 0.9971530249110321, heartbeats: STATUS_BEATS,
+    },
+    {
+      id: 27, label: 'Website', status: 1, ping: 137,
+      lastCheck: new Date(Date.now() - 12000).toISOString(),
+      uptime24h: 1, heartbeats: STATUS_BEATS.map(() => 1),
+    },
+  ],
+});
+
 await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   const url = route.request().url();
   if (url.includes('/api/history/')) {
     return route.fulfill({ status: 200, contentType: 'application/json', body: HISTORY_BODY });
+  }
+  if (url.includes('/api/status')) {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: STATUS_BODY });
   }
   const body = url.includes('/api/graph')
     ? GRAPH_BODY
@@ -192,6 +219,54 @@ for (const width of [390, 768, 900, 1440, 1920]) {
       console.log(`      ${width}px: ${s.key} "${s.text}" on ${s.lines} line(s), full precision`);
     }
   }
+}
+
+// The server-status strip, with a full payload behind it. 60 heartbeat bars at 4px are
+// 240px — more than the 390px card has to spare once "checked 38s ago" is beside them,
+// so the oldest 30 drop out below sm. Nothing in the strip may scroll sideways.
+for (const width of [390, 1440]) {
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto(BASE + '/', { waitUntil: 'load' });
+  await page.locator('#status [data-server-status="ready"]').waitFor({ timeout: 15000 });
+
+  const strip = await page.evaluate(() => {
+    const el = document.querySelector('[data-server-status]');
+    const node = document.querySelector('[data-monitor="28"]');
+    const bars = [...node.querySelectorAll('span[title]')];
+    return {
+      state: el.dataset.serverStatus,
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      rows: document.querySelectorAll('[data-monitor]').length,
+      bars: bars.length,
+      visibleBars: bars.filter((b) => b.getBoundingClientRect().width > 0).length,
+      right: Math.round(Math.max(...bars.map((b) => b.getBoundingClientRect().right))),
+      cardRight: Math.round(node.closest('.rounded-xl').getBoundingClientRect().right),
+      text: el.innerText.replace(/\s+/g, ' ').trim(),
+    };
+  });
+  console.log(`      ${width}px: ${strip.rows} rows, ${strip.visibleBars}/${strip.bars} bars shown`);
+  assert(strip.rows === 2, `${width}px: both monitors render (${strip.rows})`);
+  assert(
+    strip.scrollWidth <= strip.clientWidth + 1,
+    `${width}px: status strip does not scroll sideways (${strip.scrollWidth} <= ${strip.clientWidth})`,
+  );
+  assert(
+    strip.right <= strip.cardRight,
+    `${width}px: heartbeat bars stay inside the card (${strip.right} <= ${strip.cardRight})`,
+  );
+  assert(
+    strip.visibleBars === (width < 640 ? 30 : 60),
+    `${width}px: ${width < 640 ? 30 : 60} bars shown (got ${strip.visibleBars})`,
+  );
+  assert(
+    strip.text.includes('Up · 24h 99.7% · 12 ms'),
+    `${width}px: the node row spells out its state (got ${JSON.stringify(strip.text.slice(0, 90))})`,
+  );
+  assert(
+    strip.text.includes('Live from uptime.subimpact.net'),
+    `${width}px: the strip credits its source`,
+  );
 }
 
 // The API host is credited with a link to the source repo, not as bare text.

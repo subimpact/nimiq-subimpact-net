@@ -41,6 +41,42 @@ for (const path of ['/', '/validators/', '/graph/']) {
   assert(generic === 0, `${path}: no generic staking link left unwired (${generic} found)`);
 }
 
+// The server-status strip in the homepage's "Validator status" card. The mock above
+// answers /api/status with the same shapeless stub as everything else, so what is
+// checked here is the structure plus the graceful degradation: the strip must still
+// name its source and link to it when the payload tells it nothing.
+await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+const strip = page.locator('#status [data-server-status]');
+await strip.waitFor({ state: 'attached', timeout: 15000 });
+assert(await strip.count() === 1, '/: #status contains the server-status strip');
+
+const STATUS_PAGE = 'https://uptime.subimpact.net/status/live';
+const statusLink = strip.locator('[data-status-source]');
+const statusHref = await statusLink.getAttribute('href').catch(() => null);
+assert(statusHref === STATUS_PAGE, `/: status strip links to ${STATUS_PAGE} (got ${statusHref})`);
+assert(
+  (await statusLink.getAttribute('rel')) === 'noopener' &&
+    (await statusLink.getAttribute('target')) === '_blank',
+  '/: the status-page link opens in a new tab with rel=noopener',
+);
+
+// Either a monitor row or the "unavailable" line — both are correct answers, and
+// which one appears depends on the API, so neither is asserted on its own.
+await page
+  .locator('#status [data-monitor], #status [data-status-fallback]')
+  .first()
+  .waitFor({ state: 'visible', timeout: 15000 });
+const rows = await strip.locator('[data-monitor]').count();
+const fallback = await strip.locator('[data-status-fallback]').count();
+assert(
+  rows > 0 || fallback === 1,
+  `/: status strip resolves to rows or the unavailable state (${rows} rows, ${fallback} fallback)`,
+);
+assert(
+  (await strip.innerText()).includes('uptime.subimpact.net'),
+  '/: status strip credits uptime.subimpact.net either way',
+);
+
 assert(errors.length === 0, `no uncaught page errors (${errors.join(' | ')})`);
 console.log(`\n${passed} passed, ${failed} failed`);
 await browser.close();

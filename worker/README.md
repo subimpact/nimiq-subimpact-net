@@ -18,6 +18,7 @@ The worker whitelists a handful of GET endpoints, echoes CORS headers for known 
 | `GET /api/account/:addr`  | `/getAccountByAddress/:addr`                          |
 | `GET /api/network`        | `/getBlockNumber` + `/getEpochNumber` + `/getBatchNumber` |
 | `GET /api/graph?part=N`   | `/getValidators` + one staker call per validator      |
+| `GET /api/status`         | `uptime.subimpact.net` status page (node uptime)      |
 | `GET /api/history/:addr`  | `getTransactionsByAddress` on `rpc.nimiqwatch.com`    |
 | `GET /api/quote`          | price feed (CoinGecko → Gate.io → MEXC)               |
 | `GET /api/auth/nonce`     | — mints a signed challenge, no upstream call          |
@@ -49,6 +50,37 @@ validator lists in later parts carry no `name`. `?part` defaults to 1; a value t
 not a positive integer, or is past `part.count`, returns `400 {"error":"invalid part"}`.
 Each part is cached for 300s under its own key. Cold cost per part: 1 cache match +
 1 validators fetch + (part 1) 1 names fetch + ≤26 staker fetches + 1 cache put ≈ 30 units.
+
+### `/api/status`
+
+Whether the validator node is up, read from the operator's [Uptime
+Kuma](https://uptime.subimpact.net/status/live) rather than probed from here — Kuma has
+been checking every 60s from a fixed vantage point for as long as the node has existed,
+and a worker can only report what one Cloudflare colo saw once. The upstream is the
+public status page's own unauthenticated JSON; no token is involved and nothing here can
+write to Kuma.
+
+```json
+{ "fetchedAt": 1757605234123, "source": "uptime.subimpact.net",
+  "sourceUrl": "https://uptime.subimpact.net/status/live",
+  "monitors": [
+    { "id": 28, "label": "Validator node · p2p 8443", "status": 1, "ping": 12,
+      "lastCheck": "2026-09-11T16:20:59.143Z", "uptime24h": 0.9971530249110321,
+      "heartbeats": [1, 1, 1] }
+  ] }
+```
+
+`status` follows Kuma: `1` up, `0` down, `2` pending, `3` maintenance. `status`, `ping`
+and `lastCheck` come from the newest beat; `heartbeats` is the last ≤100 statuses,
+oldest → newest; `uptime24h` is a 0–1 ratio, `null` when Kuma reports none. Kuma writes
+beat times as `2026-09-11 16:20:59.143` with **no zone marker** and means UTC — the route
+appends the `Z` so the client cannot read them as local time.
+
+Only the two monitor ids in `STATUS_MONITORS` are passed through, always in that order,
+and one that is absent from the payload is dropped rather than faked. Those ids are
+Kuma's database ids: recreating a monitor there gives it a new one, and the constant in
+`src/index.js` has to be edited to match — until then that row simply disappears. Cold
+cost: 1 cache match + 1–2 status fetches + 1 cache put; cached 60s.
 
 ## ChainMap paywall
 

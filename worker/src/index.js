@@ -7,6 +7,10 @@
  * a small whitelist of GET endpoints, adds CORS for known origins, and caches
  * responses for 60s at the edge (300s for /api/graph, which fans out to 50+ calls).
  *
+ * GET /api/status is the one route that fronts something other than chain data: the
+ * operator's Uptime Kuma, for whether the validator node is actually up — see
+ * `nodeStatus`. Same treatment as the rest, CORS and a 60s edge cache.
+ *
  * The one write path is POST /api/broadcast, which relays an already-signed
  * transaction to a public Nimiq RPC node — see `broadcastTransaction`. It holds no
  * keys and signs nothing; the signature is produced in the Nimiq Hub popup.
@@ -75,6 +79,38 @@ const SECONDS_PER_BATCH = 60;
 
 // Nimiq addresses are NQ + 34 base32 characters (36 total), i.e. 9 four-char blocks.
 const ADDRESS_RE = /^NQ[A-Z0-9]{34}$/i;
+
+// --- Node status (Uptime Kuma) ----------------------------------------------
+
+// The operator's Uptime Kuma, on a different host from the validator it watches. The
+// `live` status page is public, and this is the same unauthenticated JSON its own web
+// UI reads — no token is involved, and nothing here can write to Kuma.
+const STATUS_UPSTREAM = 'https://uptime.subimpact.net/api/status-page/heartbeat/live';
+const STATUS_PAGE_URL = 'https://uptime.subimpact.net/status/live';
+const STATUS_SOURCE = 'uptime.subimpact.net';
+
+/**
+ * Kuma monitor ids on the `live` status page, in the order the site renders them —
+ * the validator first, the website it is announced on second.
+ *
+ * These are database ids, not names: deleting and recreating a monitor in Kuma hands
+ * it a fresh id, and this map has to be edited to match when that happens. The route
+ * skips an id it cannot find rather than failing, so a stale entry costs one missing
+ * row on the status strip, not a broken endpoint.
+ */
+const STATUS_MONITORS = [
+  { id: 28, label: 'Validator node · p2p 8443' },
+  { id: 27, label: 'Website' },
+];
+
+// Kuma sends at most 100 beats per monitor; bound it here too so a future server-side
+// change cannot quietly inflate the response the browser has to parse.
+const STATUS_MAX_BEATS = 100;
+
+// One retry, and only one. Kuma runs on a single small VPS, where an occasional reset
+// costs a blank strip on the homepage for a whole cache period; an instance that is
+// genuinely down still costs at most two subrequests per cold request.
+const STATUS_ATTEMPTS = 2;
 
 // --- ChainMap paywall -------------------------------------------------------
 
@@ -260,6 +296,10 @@ export default {
       return withHeaders(await delegationGraph(ctx, url), cors);
     }
 
+    if (segments.length === 2 && segments[1] === 'status') {
+      return withHeaders(await nodeStatus(ctx, url), cors);
+    }
+
     if (segments.length === 2 && segments[1] === 'quote') {
       return withHeaders(await priceQuote(ctx, url, env), cors);
     }
@@ -440,6 +480,112 @@ async function networkSummary(ctx, cacheUrl) {
         batchesRemaining,
         approxSecondsRemaining: batchesRemaining * SECONDS_PER_BATCH,
       },
+    },
+    200,
+    cacheControl(),
+  );
+
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+
+  return response;
+}
+
+/**
+ * The Kuma status-page payload, or null when every attempt failed.
+ *
+ * A failure is any of: transport error or timeout, non-2xx, or a body that is not
+ * JSON — the last one matters because a reverse proxy in front of Kuma answers 200
+ * with an HTML error page, which is a failure wearing a success status code.
+ */
+async function fetchKumaStatus() {
+  for (let attempt = 0; attempt < STATUS_ATTEMPTS; attempt++) {
+    try {
+      const upstream = await fetch(STATUS_UPSTREAM, {
+        method: 'GET',
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+      if (!upstream.ok) continue;
+      return await upstream.json();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * A Kuma beat time as an ISO instant. Kuma writes them as `2026-09-11 16:20:59.143`
+ * with no zone marker at all, and the instant is UTC — so the space becomes a `T` and
+ * a `Z` is appended, or whoever parses it downstream reads the wall clock as local
+ * time. Returns null for anything unparseable.
+ */
+function kumaBeatTime(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const zoned = /(?:[Zz]|[+-]\d{2}:?\d{2})$/.test(text) ? text : `${text}Z`;
+  const parsed = new Date(zoned.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+/**
+ * Is the validator node up? Answered from the operator's Uptime Kuma rather than by
+ * probing the node from here: Kuma has been checking every 60s from a fixed vantage
+ * point for as long as the node has existed, and a worker can only ever report what
+ * one request from one Cloudflare colo saw one time.
+ *
+ * Only the two monitors in STATUS_MONITORS are passed through — the `live` page
+ * carries every service the operator runs, and the rest is not this site's business.
+ * A monitor absent from the payload is dropped, so an empty `monitors` array is a
+ * valid answer: it means Kuma is reachable but no longer knows those ids.
+ */
+async function nodeStatus(ctx, url) {
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(new URL('/api/status', url.origin).toString(), { method: 'GET' });
+
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  const payload = await fetchKumaStatus();
+  const heartbeatList = payload?.heartbeatList;
+  if (!heartbeatList || typeof heartbeatList !== 'object') {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+  const uptimeList = payload.uptimeList && typeof payload.uptimeList === 'object' ? payload.uptimeList : {};
+
+  const monitors = [];
+  for (const monitor of STATUS_MONITORS) {
+    const raw = heartbeatList[String(monitor.id)];
+    if (!Array.isArray(raw)) continue;
+    // Oldest → newest, as Kuma sends them; a beat without a numeric status is not one.
+    const beats = raw.filter((beat) => beat && typeof beat.status === 'number').slice(-STATUS_MAX_BEATS);
+    if (beats.length === 0) continue;
+
+    const latest = beats[beats.length - 1];
+    const uptime24h = uptimeList[`${monitor.id}_24`];
+    monitors.push({
+      id: monitor.id,
+      label: monitor.label,
+      status: latest.status,
+      ping: typeof latest.ping === 'number' ? latest.ping : null,
+      lastCheck: kumaBeatTime(latest.time),
+      uptime24h: typeof uptime24h === 'number' && Number.isFinite(uptime24h) ? uptime24h : null,
+      heartbeats: beats.map((beat) => beat.status),
+    });
+  }
+
+  const response = jsonResponse(
+    {
+      fetchedAt: Date.now(),
+      source: STATUS_SOURCE,
+      sourceUrl: STATUS_PAGE_URL,
+      monitors,
     },
     200,
     cacheControl(),

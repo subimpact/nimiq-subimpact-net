@@ -4,6 +4,7 @@ import { VALIDATOR_ADDRESS } from '../config';
 import snapshot from '../data/validators.json';
 import { NetworkStats } from '../components/NetworkStats';
 import { LiveStats } from '../components/LiveStats';
+import { ServerStatus } from '../components/ServerStatus';
 import { CopyAddress } from '../components/CopyAddress';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -202,6 +203,7 @@ function fmtNimCompact(luna: number): string {
               initialEpoch={null}
             />
           </div>
+          <ServerStatus client:load />
           <p class="mt-5 max-w-[84ch] border-t border-border pt-4 text-sm text-muted-foreground">
             The validator is live on-chain. The node is running, synced, and registered in the official Nimiq Validators API. Delegation is open — stake with ImpactZero for 0% fees.
           </p>
