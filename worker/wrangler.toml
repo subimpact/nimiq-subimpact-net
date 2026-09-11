@@ -1,0 +1,7 @@
+name = "nimiq-api"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+routes = [
+  { pattern = "nimiq-api.subimpact.net", custom_domain = true }
+]
