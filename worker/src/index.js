@@ -11,16 +11,24 @@
  * transaction to a public Nimiq RPC node — see `broadcastTransaction`. It holds no
  * keys and signs nothing; the signature is produced in the Nimiq Hub popup.
  *
- * The ChainMap paywall adds four routes with no accounts and no database behind them:
+ * The ChainMap paywall adds six routes with no accounts and no database behind them:
  * /api/history reads an address's transactions, /api/quote prices the pass in NIM,
- * /api/entitlement looks for the payment on-chain and mints a bearer token, and
- * /api/me re-checks that token. The chain is the source of truth — see
- * `checkEntitlement`.
+ * /api/auth/nonce and /api/auth/verify sign a wallet in, /api/entitlement looks for the
+ * payment on-chain and mints a bearer token, and /api/me re-checks that token. The chain
+ * is the source of truth — see `checkEntitlement`.
+ *
+ * Sign-in is a signature, never a claim. A Nimiq address is public — it is printed in
+ * every transaction — so "I am NQ…" proves nothing. The client asks for a nonce, has the
+ * Hub sign the message that carries it, and posts the signature; this worker verifies the
+ * Ed25519 signature, derives the address from the public key that made it, and only then
+ * treats the wallet as signed in. See `verifySignIn` and `deriveAddress`.
  *
  * Everything here runs inside the Workers Free per-invocation budget of 50 units,
  * where fetch() subrequests and Cache API match/put/delete calls share one quota.
  * /api/graph is split into parts for that reason — see `delegationGraph`.
  */
+
+import { blake2b256 } from './blake2b.js';
 
 const ALLOWED_ORIGINS = [
   'https://nimiq.subimpact.net',
@@ -102,9 +110,49 @@ const ENTITLEMENT_DAYS = 30;
 // quote minutes old, and NIM moves. Accept 85% of what today's price asks rather than
 // charging someone twice for a market tick.
 const PAYMENT_TOLERANCE = 0.85;
-// One page of history to look for the payment in. Deep enough to find a payment made
-// many transactions ago, shallow enough to stay one subrequest.
-const ENTITLEMENT_TX_SCAN = 200;
+// The payment hunt walks the address's history newest-first, a page at a time. One page
+// is one subrequest, so the depth is capped: 5 x 200 = the last 1000 transactions, which
+// covers any wallet that is not a bot and costs at most 5 of the 50-unit budget.
+const ENTITLEMENT_PAGE_SIZE = 200;
+const ENTITLEMENT_MAX_PAGES = 5;
+
+// --- signed sign-in ---------------------------------------------------------
+
+// The site the sign-in message names. It is part of what the user signs, so a signature
+// collected by some other site cannot be replayed here.
+const SIGN_IN_DOMAIN = 'nimiq.subimpact.net';
+
+// What the Nimiq Hub actually signs. `signMessage` does not sign the message bytes: it
+// signs sha256(prefix + <decimal byte length> + message), where the prefix is the literal
+// 23 bytes below — 0x16 is the length of "Nimiq Signed Message:\n" and makes the digest
+// unmistakable for a transaction hash, so a signature harvested here can never be
+// replayed as a transfer.
+const SIGNED_MESSAGE_PREFIX = '\x16Nimiq Signed Message:\n';
+
+// Ed25519, as Nimiq uses it: a 32-byte public key and a 64-byte signature, both hex on
+// the wire.
+const PUBLIC_KEY_BYTES = 32;
+const SIGNATURE_BYTES = 64;
+const HEX_RE = /^[0-9a-fA-F]+$/;
+
+// A Nimiq address is the first 20 bytes of BLAKE2b-256 over the public key.
+const ADDRESS_BYTES = 20;
+// Nimiq's base32 alphabet: RFC 4648 rotated so the digits come first, with I, O, W and Z
+// dropped — the characters a human would misread as 1, 0, VV and 2.
+const BASE32_ALPHABET = '0123456789ABCDEFGHJKLMNPQRSTUVXY';
+
+// How long a nonce stays signable. Long enough for the user to find the Hub popup and
+// read what they are signing, short enough that a signature scraped from a log is stale.
+const NONCE_TTL_MS = 10 * 60 * 1000;
+
+// The two things this worker signs. `sub` is the pass itself and outlives the browser
+// session; `auth` only says "this wallet proved it holds the key", and is short because
+// its whole job is to let the client re-ask the chain without signing again.
+const AUTH_TOKEN_TTL_MS = 60 * 60 * 1000;
+const TOKEN_KINDS = new Set(['sub', 'auth']);
+
+// A sign-in body is four short strings; bound the parse like /api/broadcast.
+const MAX_AUTH_BODY = 1024;
 
 export default {
   async fetch(request, env, ctx) {
@@ -123,8 +171,19 @@ export default {
     // edge cache hit would silently swallow a re-broadcast, or hand one wallet's pass
     // to the next caller.
     const writeRoute =
-      request.method === 'POST' && isApi && segments.length === 2 ? segments[1] : null;
-    if (writeRoute === 'broadcast' || writeRoute === 'entitlement') {
+      request.method === 'POST' && isApi
+        ? segments.length === 2
+          ? segments[1]
+          : segments.length === 3 && segments[1] === 'auth'
+            ? `auth/${segments[2]}`
+            : null
+        : null;
+    const writeHandlers = {
+      broadcast: () => broadcastTransaction(request),
+      entitlement: () => checkEntitlement(request, env),
+      'auth/verify': () => verifySignIn(request, env),
+    };
+    if (writeRoute && Object.hasOwn(writeHandlers, writeRoute)) {
       // CORS only governs what a browser will let a page read back; it does not stop
       // a server from posting here. These routes' one legitimate caller is our own
       // site, which is cross-origin and so always sends an allowlisted Origin —
@@ -132,11 +191,7 @@ export default {
       if (!origin || !ALLOWED_ORIGINS.includes(origin)) {
         return withHeaders(jsonResponse({ error: 'forbidden' }, 403), cors);
       }
-      const response =
-        writeRoute === 'broadcast'
-          ? await broadcastTransaction(request)
-          : await checkEntitlement(request, env);
-      return withHeaders(response, cors);
+      return withHeaders(await writeHandlers[writeRoute](), cors);
     }
 
     if (request.method !== 'GET') {
@@ -169,6 +224,10 @@ export default {
 
     if (segments.length === 2 && segments[1] === 'me') {
       return withHeaders(await currentEntitlement(request, env), cors);
+    }
+
+    if (segments.length === 3 && segments[1] === 'auth' && segments[2] === 'nonce') {
+      return withHeaders(await issueNonce(env), cors);
     }
 
     if (segments.length === 3 && segments[1] === 'history') {
@@ -955,33 +1014,49 @@ async function signPayload(payload, secret) {
 }
 
 /**
- * The pass token: base64url("<address>.<paidUntil>.<hmac>").
+ * The bearer tokens: base64url("<kind>:<address>:<expiry>.<hmac>").
  *
- * It is a receipt, not a session — it says only "this address had paid until this
- * instant", which is what the chain said when it was minted. Nothing is stored
- * server-side, so a lost token costs the user one more /api/entitlement round trip, and
- * a stolen one expires with the pass it describes. The address is carried compacted, so
- * the payload can never contain the separator.
+ * Both kinds are receipts, not sessions. A `sub` token says "the chain showed this
+ * address paid until this instant"; an `auth` token says "this address proved it holds
+ * its key at this instant". Nothing is stored server-side, so a lost token costs the user
+ * one round trip and a stolen one expires on its own.
+ *
+ * The kind is inside the signed payload rather than alongside it, because it is exactly
+ * the thing an attacker would want to change: without it, the hour-long proof-of-key
+ * token from /api/auth/verify would also open /api/me as a 30-day pass. The address is
+ * carried compacted, and neither separator can occur in any field.
  */
-async function mintToken(addressCompact, paidUntil, secret) {
-  const payload = `${addressCompact}.${paidUntil}`;
+async function mintToken(kind, addressCompact, expiresAt, secret) {
+  const payload = `${kind}:${addressCompact}:${expiresAt}`;
   return base64UrlEncode(`${payload}.${await signPayload(payload, secret)}`);
 }
 
-/** `{addressCompact, paidUntil}` for a token this worker signed, otherwise null. */
+/** `{kind, addressCompact, expiresAt}` for a token this worker signed, otherwise null. */
 async function readToken(token, secret) {
   const decoded = typeof token === 'string' && token ? base64UrlDecode(token) : null;
   if (!decoded) return null;
 
   const parts = decoded.split('.');
-  if (parts.length !== 3) return null;
-  const [addressCompact, paidUntilRaw, signature] = parts;
-  if (!ADDRESS_RE.test(addressCompact) || !/^\d+$/.test(paidUntilRaw)) return null;
+  if (parts.length !== 2) return null;
+  const [payload, signature] = parts;
 
-  const expected = await signPayload(`${addressCompact}.${paidUntilRaw}`, secret);
+  const fields = payload.split(':');
+  if (fields.length !== 3) return null;
+  const [kind, addressCompact, expiresRaw] = fields;
+  if (!TOKEN_KINDS.has(kind) || !ADDRESS_RE.test(addressCompact) || !/^\d+$/.test(expiresRaw)) {
+    return null;
+  }
+
+  const expected = await signPayload(payload, secret);
   if (!timingSafeEqual(signature, expected)) return null;
 
-  return { addressCompact, paidUntil: Number(paidUntilRaw) };
+  return { kind, addressCompact, expiresAt: Number(expiresRaw) };
+}
+
+/** The token out of `Authorization: Bearer <token>`, or null when there is not one. */
+function bearerToken(request) {
+  const match = /^Bearer\s+(\S+)$/i.exec((request.headers.get('Authorization') || '').trim());
+  return match ? match[1] : null;
 }
 
 /** How much pass is left, in the three units the UI wants. */
@@ -990,88 +1065,391 @@ function entitlementWindow(paidUntil) {
   return { paidUntil, expiresInMs, daysLeft: Math.max(0, Math.ceil(expiresInMs / DAY_MS)) };
 }
 
+// --- signed sign-in ---------------------------------------------------------
+
+/** `length` bytes from a hex string of exactly that size, or null for anything else. */
+function hexToBytes(hex, length) {
+  if (typeof hex !== 'string' || hex.length !== length * 2 || !HEX_RE.test(hex)) return null;
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+
+/** Nimiq base32 — no padding, and 20 bytes divide into exactly 32 characters. */
+function base32Encode(bytes) {
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
 /**
- * Does this address hold a ChainMap pass? `{address}` in, an answer plus a token out.
+ * The two digits after "NQ" — an IBAN check, not a hash.
  *
- * There are no accounts here: the wallet address is the login and the payment
- * transaction is the receipt, so the only question is whether the chain shows a transfer
- * from that address to the paywall address large enough to count. The newest such
- * payment wins, and the 30 days run from its own timestamp — someone who paid three
- * weeks ago gets the week they have left, not a fresh month for asking.
+ * Nimiq addresses are IBANs in shape as well as in spelling: move the country code and
+ * its placeholder "00" to the end, replace every character by its base-36 value (A=10 …
+ * Z=35), read the result as one long decimal number, and the check is 98 - (n mod 97).
+ * The number runs to ~40 digits, so the modulo is folded digit by digit rather than
+ * asking Number to hold it.
+ */
+function ibanCheckDigits(base32Body) {
+  let remainder = 0;
+  for (const char of `${base32Body}NQ00`) {
+    for (const digit of parseInt(char, 36).toString()) {
+      remainder = (remainder * 10 + Number(digit)) % 97;
+    }
+  }
+  return String(98 - remainder).padStart(2, '0');
+}
+
+/**
+ * The address a public key spends from — the whole point of the sign-in flow, since it is
+ * what turns "this key signed" into "this account signed".
+ *
+ * Derivation, verified byte for byte against @nimiq/core in the test suite: take
+ * BLAKE2b-256 of the 32-byte public key, keep the first 20 bytes, base32 them with the
+ * alphabet above, prefix "NQ" and the IBAN check digits, and group by four.
+ *
+ * Exported so the suite can check it against real keypairs directly rather than only
+ * through a sign-in round trip; a named export beside the default one is inert to
+ * wrangler, which only looks at `default`.
+ */
+export function deriveAddress(publicKey) {
+  const body = base32Encode(blake2b256(publicKey).subarray(0, ADDRESS_BYTES));
+  const address = `NQ${ibanCheckDigits(body)}${body}`;
+  return (address.match(/.{1,4}/g) || []).join(' ');
+}
+
+/** What the Hub actually signs for `message` — see SIGNED_MESSAGE_PREFIX. */
+async function signedMessageDigest(message) {
+  const body = encoder.encode(message);
+  // The length is the message's byte count, not its character count, and is spelled in
+  // decimal ASCII. Our own messages are ASCII so the two agree, but the client picks the
+  // nonce it signs and the rule is the protocol's, not ours.
+  const header = encoder.encode(`${SIGNED_MESSAGE_PREFIX}${body.length}`);
+  const payload = new Uint8Array(header.length + body.length);
+  payload.set(header, 0);
+  payload.set(body, header.length);
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+}
+
+/**
+ * Ed25519 verify, via WebCrypto — the same primitive Nimiq signs with, so no curve
+ * arithmetic is carried here. A key the runtime refuses to import (a 32-byte string that
+ * is not a curve point) throws rather than returning false; either way it is not a
+ * signature we accept.
+ */
+async function verifyEd25519(publicKey, signature, digest) {
+  try {
+    const key = await crypto.subtle.importKey('raw', publicKey, { name: 'Ed25519' }, false, [
+      'verify',
+    ]);
+    return await crypto.subtle.verify('Ed25519', key, signature, digest);
+  } catch {
+    return false;
+  }
+}
+
+/** The message the client hands to the Hub verbatim. ASCII, so every wallet renders it. */
+function signInMessage(nonce) {
+  return `${SIGN_IN_DOMAIN} ChainMap sign-in\nnonce: ${nonce}`;
+}
+
+/**
+ * A nonce with no state behind it: "<issued-at base36>.<hmac>".
+ *
+ * Storing nonces would mean a KV namespace and a write per sign-in, to defend against a
+ * replay the 10-minute window already closes. The HMAC is what makes the timestamp
+ * unforgeable, so a nonce cannot be back-dated into the window or minted without the
+ * secret. It is domain-separated from the token HMAC so neither signature can stand in
+ * for the other.
+ */
+async function mintNonce(secret, issuedAt) {
+  const stamp = issuedAt.toString(36);
+  return `${stamp}.${await signPayload(`nonce:${stamp}`, secret)}`;
+}
+
+/** `{issuedAt}` for a nonce this worker signed inside the TTL, otherwise null. */
+async function readNonce(nonce, secret) {
+  if (typeof nonce !== 'string' || !nonce || nonce.length > 128) return null;
+
+  const parts = nonce.split('.');
+  if (parts.length !== 2) return null;
+  const [stamp, signature] = parts;
+  if (!/^[0-9a-z]{1,12}$/.test(stamp)) return null;
+
+  const expected = await signPayload(`nonce:${stamp}`, secret);
+  if (!timingSafeEqual(signature, expected)) return null;
+
+  const issuedAt = parseInt(stamp, 36);
+  // Only the upper bound is checked: a future timestamp would have to have been signed
+  // with the secret, and a worker whose clock ran ahead is not an attacker.
+  if (Date.now() - issuedAt > NONCE_TTL_MS) return null;
+
+  return { issuedAt };
+}
+
+/** `GET /api/auth/nonce` — the challenge, and the exact message to sign with it. */
+async function issueNonce(env) {
+  const secret = env && env.CHAINMAP_TOKEN_SECRET;
+  if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
+
+  const nonce = await mintNonce(secret, Date.now());
+  // No cache, at any layer: a shared nonce is a shared challenge.
+  return jsonResponse(
+    { nonce, message: signInMessage(nonce), expiresInMs: NONCE_TTL_MS },
+    200,
+    { 'Cache-Control': 'no-store' },
+  );
+}
+
+/**
+ * Walk an address's history newest-first looking for the payment that buys a pass.
+ *
+ * The node pages with `startAt` set to the last hash of the page before, and returns
+ * newest first — so the first page carrying a qualifying payment carries the newest one,
+ * and the walk stops there rather than reading history it cannot use. A short page is the
+ * end of the history and also stops the walk; otherwise it gives up after
+ * ENTITLEMENT_MAX_PAGES and the caller reports `no_payment`.
+ *
+ * Within a page the ordering is not leaned on — the newest timestamp wins explicitly,
+ * because this number decides how much pass someone has left.
+ */
+async function findNewestPayment(address, target, minimumLuna) {
+  let startAt = null;
+  let sawUnderpayment = false;
+
+  for (let page = 1; page <= ENTITLEMENT_MAX_PAGES; page++) {
+    const result = await fetchTransactions(address, ENTITLEMENT_PAGE_SIZE, startAt);
+    if (!result.ok) return { ok: false };
+
+    let newest = null;
+    for (const row of result.data) {
+      const tx = normalizeTransaction(row);
+      if (!tx || compactAddress(tx.to) !== target) continue;
+      if (tx.value < minimumLuna) {
+        sawUnderpayment = true;
+        continue;
+      }
+      const timestamp = Number.isFinite(tx.timestamp) ? tx.timestamp : 0;
+      if (!newest || timestamp > newest.timestamp) newest = { timestamp };
+    }
+    if (newest) return { ok: true, payment: newest, sawUnderpayment, pages: page };
+
+    // The cursor has to be a hash the node will accept, and it comes off the raw row:
+    // a row we could not normalize still moves the page forward.
+    const last = result.data[result.data.length - 1];
+    const rawHash = last && typeof last.hash === 'string' ? last.hash.trim() : '';
+    const cursor = TX_HASH_RE.test(rawHash) ? rawHash : null;
+    if (result.data.length < ENTITLEMENT_PAGE_SIZE || !cursor || cursor === startAt) {
+      return { ok: true, payment: null, sawUnderpayment, pages: page };
+    }
+    startAt = cursor;
+  }
+
+  return { ok: true, payment: null, sawUnderpayment, pages: ENTITLEMENT_MAX_PAGES };
+}
+
+/**
+ * Does the chain show a pass for this address? The one place that question is answered,
+ * shared by /api/auth/verify and /api/entitlement.
+ *
+ * There are no accounts here: the payment transaction on chain is the receipt, so the
+ * only question is whether there is a transfer from that address to the paywall address
+ * large enough to count. The newest such payment wins, and the 30 days run from its own
+ * timestamp — someone who paid three weeks ago gets the week they have left, not a fresh
+ * month for asking.
  *
  * The price is re-fetched rather than taken from the request: a caller who could name
  * their own `requiredLuna` could buy the pass for a luna. PAYMENT_TOLERANCE then allows
  * for NIM having moved between the quote the user signed and this moment.
  *
- * Callers are gated on Origin in `fetch` before this runs, and nothing here is cached —
- * a cached answer would hand the first caller's pass to the next wallet that asked.
+ * Returns `{status: 'upstream' | 'unpaid' | 'paid', …}`; the callers shape the JSON,
+ * because the two routes answer in different envelopes.
  */
-async function checkEntitlement(request, env) {
+async function resolveEntitlement(address, env) {
+  const priceUsd = await fetchNimPriceUsd();
+  if (priceUsd === null) return { status: 'upstream' };
+
+  const requiredLuna = requiredLunaAt(priceUsd);
+  const minimumLuna = Math.floor(PAYMENT_TOLERANCE * requiredLuna);
+
+  const search = await findNewestPayment(address, compactAddress(paywallAddress(env)), minimumLuna);
+  if (!search.ok) return { status: 'upstream' };
+
+  if (!search.payment) {
+    return {
+      status: 'unpaid',
+      reason: search.sawUnderpayment ? 'amount_too_low' : 'no_payment',
+      requiredLuna,
+      priceUsd,
+    };
+  }
+
+  const paidUntil = search.payment.timestamp + ENTITLEMENT_DAYS * DAY_MS;
+  if (Date.now() >= paidUntil) {
+    return { status: 'unpaid', reason: 'expired', paidUntil, requiredLuna, priceUsd };
+  }
+
+  return { status: 'paid', paidUntil, requiredLuna, priceUsd };
+}
+
+/**
+ * `POST /api/auth/verify` — sign in a wallet by signature, then tell it where it stands.
+ *
+ * This is the route that makes the paywall mean anything. An address proves nothing on
+ * its own: every paid address is written on the chain in public, so the previous version
+ * of this flow — post `{address}`, get a pass — handed a 30-day token to anyone who read
+ * a block explorer. Here the client posts a signature over a nonce this worker issued,
+ * and the address is *derived from the key that produced it* rather than taken on trust.
+ *
+ * The four checks run in order, each with its own 401, because the client shows the user
+ * a different thing for each: a stale nonce means "try again", a bad signature means "that
+ * wallet did not sign", a mismatch means the address and the key disagree.
+ *
+ * Both tokens are minted whatever the payment says. `authToken` is proof of key and is
+ * useful to an unpaid wallet — it is what lets the client re-check after the user pays,
+ * without a second Hub popup. `token`, the pass itself, is only minted when the chain
+ * shows one.
+ *
+ * Callers are gated on Origin in `fetch` before this runs, and nothing here is cached.
+ */
+async function verifySignIn(request, env) {
+  const secret = env && env.CHAINMAP_TOKEN_SECRET;
+  if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
+
   let body;
   try {
     const raw = await request.text();
-    // A valid body is one address in a JSON envelope; bound the parse like broadcast.
-    if (raw.length > 1024) return jsonResponse({ error: 'invalid body' }, 400);
+    if (raw.length > MAX_AUTH_BODY) return jsonResponse({ error: 'invalid body' }, 400);
     body = JSON.parse(raw);
   } catch {
     return jsonResponse({ error: 'invalid body' }, 400);
   }
-
-  const address = normalizeAddress(body && body.address);
-  if (!address) return jsonResponse({ error: 'invalid address' }, 400);
-
-  const secret = env && env.CHAINMAP_TOKEN_SECRET;
-  if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
-
-  const priceUsd = await fetchNimPriceUsd();
-  if (priceUsd === null) return jsonResponse({ error: 'upstream' }, 502);
-  const requiredLuna = requiredLunaAt(priceUsd);
-  const minimumLuna = Math.floor(PAYMENT_TOLERANCE * requiredLuna);
-
-  const result = await fetchTransactions(address, ENTITLEMENT_TX_SCAN, null);
-  if (!result.ok) return jsonResponse({ error: 'upstream' }, 502);
-
-  const target = compactAddress(paywallAddress(env));
-  let newestPayment = null;
-  let sawUnderpayment = false;
-  for (const row of result.data) {
-    const tx = normalizeTransaction(row);
-    if (!tx || compactAddress(tx.to) !== target) continue;
-    if (tx.value < minimumLuna) {
-      sawUnderpayment = true;
-      continue;
-    }
-    // The node returns newest first, but its ordering is not something to lean on when
-    // the answer decides how much pass someone has left.
-    const timestamp = Number.isFinite(tx.timestamp) ? tx.timestamp : 0;
-    if (!newestPayment || timestamp > newestPayment.timestamp) newestPayment = { timestamp };
+  // An array parses as an object and would fall through to "invalid address"; a sign-in
+  // body is a JSON object or it is nothing.
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return jsonResponse({ error: 'invalid body' }, 400);
   }
 
-  if (!newestPayment) {
+  // Shape first, so a typo costs a 400 and no work: the checks below spend a SHA-256, a
+  // curve operation and up to six subrequests each.
+  const claimed = normalizeAddress(body.address);
+  if (!claimed) return jsonResponse({ error: 'invalid address' }, 400);
+  const publicKey = hexToBytes(body.signerPublicKey, PUBLIC_KEY_BYTES);
+  if (!publicKey) return jsonResponse({ error: 'invalid public key' }, 400);
+  const signature = hexToBytes(body.signature, SIGNATURE_BYTES);
+  if (!signature) return jsonResponse({ error: 'invalid signature' }, 400);
+
+  if (!(await readNonce(body.nonce, secret))) {
+    return jsonResponse({ error: 'invalid nonce' }, 401);
+  }
+
+  // The message is rebuilt from the nonce rather than accepted from the client: whatever
+  // they signed, what is verified is the one sentence this worker would have issued.
+  const digest = await signedMessageDigest(signInMessage(body.nonce));
+  if (!(await verifyEd25519(publicKey, signature, digest))) {
+    return jsonResponse({ error: 'invalid signature' }, 401);
+  }
+
+  const address = deriveAddress(publicKey);
+  if (compactAddress(address) !== compactAddress(claimed)) {
+    return jsonResponse({ error: 'address mismatch' }, 401);
+  }
+
+  const entitlement = await resolveEntitlement(address, env);
+  if (entitlement.status === 'upstream') return jsonResponse({ error: 'upstream' }, 502);
+
+  const addressCompact = compactAddress(address);
+  const authToken = await mintToken('auth', addressCompact, Date.now() + AUTH_TOKEN_TTL_MS, secret);
+
+  if (entitlement.status !== 'paid') {
     return jsonResponse(
       {
+        ok: true,
         entitled: false,
-        reason: sawUnderpayment ? 'amount_too_low' : 'no_payment',
-        requiredLuna,
-        priceUsd,
+        reason: entitlement.reason,
+        ...(entitlement.paidUntil ? { paidUntil: entitlement.paidUntil } : {}),
+        authToken,
+        requiredLuna: entitlement.requiredLuna,
+        priceUsd: entitlement.priceUsd,
+        paywallAddress: paywallAddress(env),
       },
       200,
     );
   }
 
-  const paidUntil = newestPayment.timestamp + ENTITLEMENT_DAYS * DAY_MS;
-  if (Date.now() >= paidUntil) {
-    return jsonResponse({ entitled: false, reason: 'expired', paidUntil, requiredLuna, priceUsd }, 200);
+  return jsonResponse(
+    {
+      ok: true,
+      entitled: true,
+      address,
+      ...entitlementWindow(entitlement.paidUntil),
+      token: await mintToken('sub', addressCompact, entitlement.paidUntil, secret),
+      authToken,
+      requiredLuna: entitlement.requiredLuna,
+      priceUsd: entitlement.priceUsd,
+    },
+    200,
+  );
+}
+
+/**
+ * `POST /api/entitlement` — re-ask the chain about an already signed-in wallet.
+ *
+ * The address comes from the `auth` token and nowhere else, which is the whole difference
+ * from the version this replaced: there is no body to name an address in. It is the route
+ * the client polls while a payment confirms, so it costs a Hub popup only on the first
+ * sign-in of the hour, not on every check.
+ *
+ * Callers are gated on Origin in `fetch` before this runs, and nothing here is cached —
+ * a cached answer would hand the first caller's pass to the next wallet that asked.
+ */
+async function checkEntitlement(request, env) {
+  const secret = env && env.CHAINMAP_TOKEN_SECRET;
+  if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
+
+  const claims = await readToken(bearerToken(request), secret);
+  // A `sub` token is turned away as firmly as a forged one: it is a statement about a
+  // pass, not proof that whoever holds it can sign for the address.
+  if (!claims || claims.kind !== 'auth' || Date.now() >= claims.expiresAt) {
+    return jsonResponse({ error: 'invalid token' }, 401);
+  }
+
+  const address = normalizeAddress(claims.addressCompact);
+  const entitlement = await resolveEntitlement(address, env);
+  if (entitlement.status === 'upstream') return jsonResponse({ error: 'upstream' }, 502);
+
+  if (entitlement.status !== 'paid') {
+    return jsonResponse(
+      {
+        entitled: false,
+        reason: entitlement.reason,
+        ...(entitlement.paidUntil ? { paidUntil: entitlement.paidUntil } : {}),
+        requiredLuna: entitlement.requiredLuna,
+        priceUsd: entitlement.priceUsd,
+      },
+      200,
+    );
   }
 
   return jsonResponse(
     {
       entitled: true,
       address,
-      ...entitlementWindow(paidUntil),
-      requiredLuna,
-      priceUsd,
-      token: await mintToken(compactAddress(address), paidUntil, secret),
+      ...entitlementWindow(entitlement.paidUntil),
+      token: await mintToken('sub', claims.addressCompact, entitlement.paidUntil, secret),
+      requiredLuna: entitlement.requiredLuna,
+      priceUsd: entitlement.priceUsd,
     },
     200,
   );
@@ -1081,21 +1459,19 @@ async function checkEntitlement(request, env) {
  * Re-check a pass token — the path the app takes on every page load, costing no
  * subrequest at all, since the token already carries the answer the chain gave.
  *
- * A token we did not sign, or one edited after we did, is a 401. A token that is genuine
- * but describes a pass that has run out is a 200 saying so: the client is authenticated,
- * it simply has nothing left, and the difference tells it whether to show "connect
- * wallet" or "renew".
+ * A token we did not sign, one edited after we did, or an `auth` token presented as a
+ * pass is a 401. A `sub` token that is genuine but describes a pass that has run out is a
+ * 200 saying so: the client is authenticated, it simply has nothing left, and the
+ * difference tells it whether to show "connect wallet" or "renew".
  */
 async function currentEntitlement(request, env) {
   const secret = env && env.CHAINMAP_TOKEN_SECRET;
   if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
 
-  const header = request.headers.get('Authorization') || '';
-  const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
-  const claims = match ? await readToken(match[1], secret) : null;
-  if (!claims) return jsonResponse({ error: 'invalid token' }, 401);
+  const claims = await readToken(bearerToken(request), secret);
+  if (!claims || claims.kind !== 'sub') return jsonResponse({ error: 'invalid token' }, 401);
 
-  if (Date.now() >= claims.paidUntil) {
+  if (Date.now() >= claims.expiresAt) {
     return jsonResponse({ entitled: false, reason: 'expired' }, 200);
   }
 
@@ -1103,7 +1479,7 @@ async function currentEntitlement(request, env) {
     {
       entitled: true,
       address: normalizeAddress(claims.addressCompact),
-      ...entitlementWindow(claims.paidUntil),
+      ...entitlementWindow(claims.expiresAt),
     },
     200,
   );
