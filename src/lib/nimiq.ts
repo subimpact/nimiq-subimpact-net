@@ -16,6 +16,31 @@ export function compactAddress(raw: string): string {
   return raw.replace(/\s+/g, "").toUpperCase()
 }
 
+/**
+ * NQ + 2 check digits + 32 base32 characters. Nimiq's alphabet drops I, O, W and
+ * Z, the four that read as 1, 0, VV and 2.
+ */
+const ADDRESS_SHAPE = /^NQ[0-9]{2}[0-9A-HJ-NP-VXY]{32}$/
+
+/**
+ * True only for an address that is also self-consistent — the IBAN mod-97 check
+ * the two digits after NQ carry. A single mistyped character fails it, which is
+ * why the ChainMap input can refuse to start a scan before spending a request.
+ */
+export function isValidAddress(raw: string): boolean {
+  const clean = compactAddress(raw)
+  if (!ADDRESS_SHAPE.test(clean)) return false
+  // IBAN check: move the country prefix to the back, read letters as 10..35,
+  // and take the whole thing mod 97 — a valid address leaves 1.
+  const rearranged = `${clean.slice(4)}${clean.slice(0, 4)}`
+  let remainder = 0
+  for (const char of rearranged) {
+    const value = char >= "0" && char <= "9" ? char.charCodeAt(0) - 48 : char.charCodeAt(0) - 55
+    remainder = (remainder * (value > 9 ? 100 : 10) + value) % 97
+  }
+  return remainder === 1
+}
+
 /** Canonical Nimiq spelling: NQ08 ACT8 T0FE ... in four-character blocks. */
 export function formatAddress(raw: string): string {
   const clean = compactAddress(raw)

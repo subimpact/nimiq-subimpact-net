@@ -2,7 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import snapshot from '../../data/validators.json';
 import { NetworkStats } from '../../components/NetworkStats';
-import { ValidatorTable } from '../../components/ValidatorTable';
+import { ValidatorsPanel } from '../../components/ValidatorsPanel';
 
 const totalStaked = snapshot.validators.reduce((s, v) => s + (v.balance || 0), 0);
 const totalStakers = snapshot.validators.reduce((s, v) => s + Math.max(v.stakers || 0, 0), 0);
@@ -19,7 +19,7 @@ function fmtNim(luna: number): string {
     <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">Network overview</p>
     <h1 class="text-3xl font-bold tracking-tight md:text-4xl">Nimiq validators, compared</h1>
     <p class="mt-3 max-w-[60ch] text-sm leading-relaxed text-muted-foreground">
-      Every validator listed in the official Nimiq Validators API, with fees, payout type, trust scores, and stake. Data refreshes live from the API.
+      Every validator listed in the official Nimiq Validators API, with fees, payout type, trust scores, and stake. Data refreshes live from the API. Switch to <strong class="font-medium text-foreground">Map</strong> for the delegation graph — every validator and every address staking with one.
     </p>
 
     <div class="mt-8">
@@ -34,7 +34,7 @@ function fmtNim(luna: number): string {
     </div>
 
     <div class="mt-10">
-      <ValidatorTable initial={snapshot.validators} client:load />
+      <ValidatorsPanel initial={snapshot.validators} client:load />
     </div>
   </section>
 </Layout>

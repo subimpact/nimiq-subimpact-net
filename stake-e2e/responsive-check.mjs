@@ -1,14 +1,20 @@
-// Desktop-wide layout check: no horizontal overflow at any viewport, and the
-// delegation map actually fills a desktop screen. Graph data is mocked so the
-// canvas renders without the live API.
+// Desktop-wide layout check: no horizontal overflow at any viewport, and both
+// maps — ChainMap at /graph/ and the delegation map at /validators/?view=map —
+// actually fill a desktop screen. All API data is mocked so the canvases render
+// without the live API.
 import { chromium } from '/root/projects/alphaaccess-my/e2e/node_modules/playwright/index.mjs';
 
 const BASE = process.env.BASE || 'http://localhost:4331';
-const PATHS = ['/', '/validators/', '/graph/'];
+const PATHS = ['/', '/validators/', '/graph/', '/validators/?view=map'];
+const SEED = 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY';
+const COUNTERPARTY = 'NQ27 NCB1 3CYU 9P4L EM2V D7L2 28QE 36PA EXB1';
+// `minCanvas` is the ChainMap target — /graph/ keeps the near-full-bleed 1920px
+// shell, because the map is the page. `minMapCard` is the delegation map's, now
+// that it lives inside the 1600px shell every other content page uses.
 const VIEWPORTS = [
-  { name: 'desktop 1440x900', width: 1440, height: 900, minCanvas: 1300 },
-  { name: 'desktop 1920x1080', width: 1920, height: 1080, minCanvas: 1700 },
-  { name: 'mobile 390x844', width: 390, height: 844, minCanvas: 0 },
+  { name: 'desktop 1440x900', width: 1440, height: 900, minCanvas: 1300, minMapCard: 1340 },
+  { name: 'desktop 1920x1080', width: 1920, height: 1080, minCanvas: 1700, minMapCard: 1500 },
+  { name: 'mobile 390x844', width: 390, height: 844, minCanvas: 0, minMapCard: 0 },
 ];
 
 let passed = 0, failed = 0;
@@ -38,8 +44,22 @@ const GRAPH_BODY = JSON.stringify({
 
 const browser = await chromium.launch();
 const context = await browser.newContext();
+/** Two hops of flow, enough for ChainMap to draw something measurable. */
+const HISTORY_BODY = JSON.stringify({
+  data: [
+    {
+      hash: 'a'.repeat(64), blockNumber: 61000000, timestamp: Date.now() - 86400000,
+      confirmations: 900, size: 139, from: SEED, to: COUNTERPARTY, value: 500000, fee: 0,
+    },
+  ],
+  pagination: { nextStartAt: null },
+});
+
 await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   const url = route.request().url();
+  if (url.includes('/api/history/')) {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: HISTORY_BODY });
+  }
   const body = url.includes('/api/graph')
     ? GRAPH_BODY
     : JSON.stringify({ data: [], validators: [], epochNumber: 1234, epoch: { approxSecondsRemaining: 900 } });
@@ -67,7 +87,16 @@ for (const vp of VIEWPORTS) {
       `${path}: no horizontal overflow (scrollWidth ${box.scrollWidth} <= innerWidth ${box.innerWidth})`,
     );
 
-    if (path === '/graph/') {
+    const isChainMap = path === '/graph/';
+    if (isChainMap || path.includes('view=map')) {
+      // ChainMap draws nothing until it is given an address to follow.
+      if (isChainMap) {
+        await page
+          .locator('astro-island[component-export="ChainMap"]:not([ssr])')
+          .waitFor({ state: 'attached', timeout: 15000 });
+        await page.locator('[data-chainmap-input]').fill(SEED);
+        await page.locator('[data-chainmap-scan]').click();
+      }
       const canvas = page.locator('canvas').first();
       await canvas.waitFor({ state: 'visible', timeout: 20000 });
       const rect = await canvas.evaluate((el) => {
@@ -79,16 +108,14 @@ for (const vp of VIEWPORTS) {
         };
       });
       console.log(`      canvas ${rect.w} x ${rect.h} px · map card ${rect.cardW} x ${rect.cardH} px`);
-      if (vp.minCanvas) {
-        // The 18rem cluster sidebar sits inside the map card, so the canvas can
-        // never be wider than viewport − 288px. The target is measured on the
-        // card (canvas + sidebar), with the canvas floor set to what the card
-        // leaves over.
-        assert(rect.cardW >= vp.minCanvas, `/graph/: map card width ${rect.cardW} >= ${vp.minCanvas}`);
-        assert(
-          rect.w >= vp.minCanvas - 300,
-          `/graph/: canvas takes all of the card minus the sidebar (${rect.w} >= ${vp.minCanvas - 300})`,
-        );
+      const target = isChainMap ? vp.minCanvas : vp.minMapCard;
+      if (target) {
+        assert(rect.cardW >= target, `${path}: map card width ${rect.cardW} >= ${target}`);
+        // The delegation map keeps an 18rem cluster sidebar inside its card, so
+        // its canvas can never be wider than the card − 288px. ChainMap has no
+        // sidebar and should take essentially the whole card.
+        const floor = isChainMap ? target - 60 : target - 300;
+        assert(rect.w >= floor, `${path}: canvas takes the card it is given (${rect.w} >= ${floor})`);
       }
     }
 
