@@ -67,9 +67,14 @@ function fmtNimCompact(luna: number): string {
             <!-- Full precision only where the cell is actually wide enough:
                  sm–md (hero still one column) and lg+ (hero split, but the
                  shell is wide again). Compact below sm and across md, where
-                 the two-column hero squeezes the card to ~142px. -->
+                 the two-column hero squeezes the card to ~142px.
+                 At lg+ the figure fits but a text-2xl "NIM" pushed the pair to
+                 ~238px against a 206–232px cell, so the unit fell to a second
+                 line. Dropping the unit to text-base costs it ~22px and puts
+                 the pair back on one line from 1120px up; below that the cell
+                 is only ~206–220px and it still wraps rather than clips. -->
             <dd class="tabular mt-1 font-mono text-2xl font-semibold text-foreground" data-stat="total-staked">
-              <span class="sm:hidden md:inline lg:hidden">{fmtNimCompact(totalStaked)} NIM</span><span class="hidden sm:inline md:hidden lg:inline">{fmtNim(totalStaked)} NIM</span>
+              <span class="sm:hidden md:inline lg:hidden">{fmtNimCompact(totalStaked)} NIM</span><span class="hidden sm:inline md:hidden lg:inline">{fmtNim(totalStaked)}</span><span class="hidden sm:inline md:hidden lg:inline lg:text-base"> NIM</span>
             </dd>
           </div>
           <div class="min-w-0">
