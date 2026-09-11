@@ -100,7 +100,7 @@ receipts rather than sessions — nothing is stored server-side:
 | Kind   | Lives    | Says                                       | Accepted by         |
 | ------ | -------- | ------------------------------------------ | ------------------- |
 | `auth` | 60 min   | this key signed for this address           | `/api/entitlement`  |
-| `sub`  | to `paidUntil` (≤30 days) | the chain showed a payment | `/api/me`           |
+| `sub`  | to `paidUntil` (30 days paid, a century comped) | the chain showed a payment, or the operator granted one | `/api/me` |
 
 The kind is inside the signed payload, so neither can be passed off as the other. `verify`
 mints `auth` whatever the chain says — that is what lets the client poll while a payment
@@ -127,6 +127,23 @@ any upstream. A token we did not sign is `401`, as is an `auth` token; a genuine
 token whose pass has run out is `200 {"entitled":false,"reason":"expired"}`, which tells
 the client to show *renew* rather than *connect wallet*.
 
+### Comped wallets
+
+Addresses named in `COMP_ADDRESSES` hold a pass without paying for one. The check is the
+first thing `resolveEntitlement` does, before the price fetch and before the history walk,
+so a comped wallet signs in when every price feed is refusing Cloudflare and the RPC node
+is down — which is most of the point of having one. Its answer is an ordinary paid one
+plus `comp: true`, with `paidUntil` a century out and no `requiredLuna`/`priceUsd`, since
+nothing was priced; the client reads the flag and prints *no expiry* rather than counting
+out 36,500 days. Everything downstream — the `sub` token, the tier, the depth and export
+limits — sees a pass like any other.
+
+Being on the list grants nothing by itself: the address still has to prove it holds its
+key on `/api/auth/verify`, and the address the list is checked against is the one *derived
+from the signature*, never one a caller named. `/api/me` re-reads the list on every call
+rather than trusting a flag baked into a token, so removing an address stops it claiming
+to be comped immediately; its existing token still runs to its own expiry.
+
 ### Price sources
 
 The pass is priced in USD and paid in NIM, so every route above needs a spot price before
@@ -152,7 +169,11 @@ of 1, still inside the 50-unit budget.
 
 ### Configuration
 
-`PAYWALL_ADDRESS` is a plain var in `wrangler.toml`. `CHAINMAP_TOKEN_SECRET` signs the
+`PAYWALL_ADDRESS` and `COMP_ADDRESSES` are plain vars in `wrangler.toml` — both name
+addresses, which are public anyway. `COMP_ADDRESSES` is a comma-separated list in any
+spacing or casing; an entry that is not a Nimiq address is dropped rather than matched, so
+a typo comps nobody. Granting and revoking is editing that line and redeploying.
+`CHAINMAP_TOKEN_SECRET` signs the
 nonces and both token kinds and is **not** in the repo — set it per environment with
 `npx wrangler secret put CHAINMAP_TOKEN_SECRET`. Without it the sign-in and token routes
 answer `500`; rotating it invalidates every issued token and nonce, costing each holder

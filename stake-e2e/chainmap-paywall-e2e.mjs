@@ -445,6 +445,57 @@ async function signIn(page) {
   await context.close()
 }
 
+// ===========================================================================
+// 7. A comped pass — the owner's wallet, granted rather than paid for
+// ===========================================================================
+{
+  // What the worker answers for an address on COMP_ADDRESSES: an ordinary pass, a
+  // century out, flagged so the client labels it instead of counting it down.
+  const { context, page } = await openMap({
+    worker: {
+      me: {
+        entitled: true,
+        comp: true,
+        address: WALLET,
+        paidUntil: Date.now() + 36500 * DAY,
+        daysLeft: 36500,
+        expiresInMs: 36500 * DAY,
+      },
+    },
+    token: 'sub-token-comp',
+  })
+
+  const badge = page.locator('[data-chainmap-tier="paid"]')
+  await badge.waitFor({ timeout: 15000 })
+  const badgeText = (await badge.innerText()).replace(/\s+/g, ' ')
+  assert(
+    badgeText.includes('Owner pass') && badgeText.includes('no expiry'),
+    `a comped pass is badged as an owner pass with no expiry (got "${badgeText}")`,
+  )
+  assert(
+    !badgeText.includes('36500') && !badgeText.includes('days left'),
+    'the badge never counts out the five-digit day total behind a comp pass',
+  )
+  assert(
+    (await page.locator('[data-chainmap-paywall]').count()) === 0,
+    'the paywall never opens itself for an entitled comp wallet',
+  )
+  assert(
+    (await page.locator('[data-chainmap-depth="6"]').getAttribute('data-locked')) === null,
+    'a comp pass is the paid tier: depth 6 is unlocked',
+  )
+
+  await badge.click()
+  const dialog = page.locator('[data-chainmap-paywall]')
+  await dialog.waitFor({ state: 'visible', timeout: 15000 })
+  assert(
+    (await dialog.locator('[data-chainmap-days-left]').innerText()).trim() === 'Owner',
+    'the manage dialog names the pass rather than counting days',
+  )
+  assert((await dialog.innerText()).includes('Never'), 'the manage dialog says it never expires')
+  await context.close()
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 await browser.close()
 process.exit(failed > 0 ? 1 : 0)

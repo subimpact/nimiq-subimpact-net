@@ -182,6 +182,22 @@ const TOKEN_SECRET = 'test-secret-not-the-deployed-one';
 /** The bindings the worker reads off `env`; wrangler supplies these in production. */
 const ENV = { PAYWALL_ADDRESS, CHAINMAP_TOKEN_SECRET: TOKEN_SECRET };
 
+/**
+ * The same bindings plus a comp list, written the way wrangler.toml writes it: one
+ * comma-separated string. The addresses are always keypairs this suite generated, so the
+ * real comped wallet never appears here — what is under test is the var, not its value.
+ */
+function compEnv(...addresses) {
+  return { ...ENV, COMP_ADDRESSES: addresses.join(',') };
+}
+
+/** Every upstream refuses. A comp pass is the one that still has to work through this. */
+function deadUpstream() {
+  return () => {
+    throw new Error('connection refused');
+  };
+}
+
 // The fixture price and the amounts derived from it, worked out here rather than read
 // back from the worker — these literals are what the arithmetic is being checked against.
 //   $29.99 / $0.0004 per NIM      = 74,975 NIM
@@ -416,11 +432,12 @@ function mintTestNonce(issuedAt, secret = TOKEN_SECRET) {
   return `${stamp}.${createHmac('sha256', secret).update(`nonce:${stamp}`).digest('hex')}`;
 }
 
-function postVerify(body, headers = {}) {
+function postVerify(body, headers = {}, init = {}) {
   return call('/api/auth/verify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
     body: typeof body === 'string' ? body : JSON.stringify(body),
+    ...init,
   });
 }
 
@@ -429,16 +446,23 @@ function postVerify(body, headers = {}) {
  * posted to /api/auth/verify. Every field is overridable, and the signature follows
  * whichever nonce ends up in the body unless the test overrides it too — which is how the
  * negative cases below swap one field at a time.
+ *
+ * `init` reaches `call` untouched, so a test can sign in against different bindings —
+ * which is how the comp cases below supply their own COMP_ADDRESSES.
  */
-function signIn(wallet, overrides = {}) {
+function signIn(wallet, overrides = {}, init = {}) {
   const nonce = 'nonce' in overrides ? overrides.nonce : mintTestNonce(Date.now());
-  return postVerify({
-    address: 'address' in overrides ? overrides.address : wallet.address,
-    signerPublicKey:
-      'signerPublicKey' in overrides ? overrides.signerPublicKey : wallet.publicKeyHex,
-    signature: 'signature' in overrides ? overrides.signature : wallet.sign(signInMessage(nonce)),
-    nonce,
-  });
+  return postVerify(
+    {
+      address: 'address' in overrides ? overrides.address : wallet.address,
+      signerPublicKey:
+        'signerPublicKey' in overrides ? overrides.signerPublicKey : wallet.publicKeyHex,
+      signature: 'signature' in overrides ? overrides.signature : wallet.sign(signInMessage(nonce)),
+      nonce,
+    },
+    {},
+    init,
+  );
 }
 
 /** The price sources this invocation called, named, in the order it called them. */
@@ -2389,6 +2413,172 @@ await test('GET /api/me without the token secret -> 500', async () => {
   });
   assertEqual(res.status, 500, 'status');
   assertEqual((await res.json()).error, 'server misconfigured', 'body.error');
+});
+
+// --- ChainMap comp access --------------------------------------------------
+//
+// A comped wallet holds a pass it never paid for, named in the COMP_ADDRESSES var. The
+// two things worth proving are that it is answered *before* any upstream — so the comp
+// pass survives a dead price feed and a dead RPC node, which is most of the point — and
+// that being comped is the only difference: same signature check, same token, same
+// everything a paid pass gets.
+
+const COMP_PASS_MS = 100 * 365 * DAY_MS;
+
+await test('comp: a comped wallet signs in with every upstream down -> entitled', async () => {
+  const wallet = makeWallet();
+  upstreamHandler = deadUpstream();
+
+  const res = await signIn(wallet, {}, { env: compEnv(wallet.addressCompact) });
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.ok, true, 'ok');
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.comp, true, 'comp');
+  assertEqual(body.address, wallet.address, 'address (derived, in canonical blocks)');
+
+  // Nothing was fetched — not the price, not the history. This is the assertion the
+  // whole short-circuit exists for: the handler above throws on every call, and a comp
+  // sign-in that reached it would have 502'd.
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+  assertEqual(priceCalls().length, 0, 'price source calls');
+  assertEqual(historyCalls().length, 0, 'getTransactionsByAddress calls');
+
+  // Nothing was priced either, so nothing is quoted.
+  assertEqual(body.requiredLuna, undefined, 'requiredLuna (a comp pass has no price)');
+  assertEqual(body.priceUsd, undefined, 'priceUsd (a comp pass has no price)');
+
+  // The pass itself is an ordinary `sub` token — same format, same HMAC, just a far
+  // expiry. The client cannot tell it apart, which is the point.
+  assertEqual(
+    body.token,
+    mintTestToken('sub', wallet.addressCompact, body.paidUntil),
+    'token (base64url of "sub:<address>:<paidUntil>.<hmac>")',
+  );
+  const horizon = body.paidUntil - Date.now();
+  assert(
+    horizon > COMP_PASS_MS - 5000 && horizon <= COMP_PASS_MS,
+    `paidUntil is a century out: got ${horizon}ms`,
+  );
+  assertEqual(body.daysLeft, 36500, 'daysLeft (the number the client renders as "no expiry")');
+
+  // And the hour-long proof of key is minted exactly as it is for anyone else.
+  const [payload] = Buffer.from(body.authToken, 'base64url').toString().split('.');
+  const [kind, addressCompact, expiresRaw] = payload.split(':');
+  assertEqual(kind, 'auth', 'authToken kind');
+  assertEqual(addressCompact, wallet.addressCompact, 'authToken address');
+  const ttl = Number(expiresRaw) - Date.now();
+  assert(ttl > HOUR_MS - 5000 && ttl <= HOUR_MS, `authToken TTL is 60 minutes: got ${ttl}ms`);
+});
+
+await test('comp: a wallet that is not on the list is unchanged -> no_payment', async () => {
+  const comped = makeWallet();
+  const other = makeWallet();
+  upstreamHandler = paywallUpstream({ txs: [txFixture({ from: other.address })] });
+
+  const res = await signIn(other, {}, { env: compEnv(comped.addressCompact) });
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.comp, undefined, 'comp (absent, not false, for a wallet off the list)');
+  assertEqual(body.reason, 'no_payment', 'reason');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.token, undefined, 'token (no pass without a payment)');
+
+  // The full path ran for this one: a price was fetched and the chain was read.
+  assertEqual(priceCalls().length, 1, 'price source calls');
+  assertEqual(historyCalls().length, 1, 'getTransactionsByAddress calls');
+  assertEqual(lastHistoryParams()[0], other.address, 'RPC address param');
+});
+
+await test('comp: the list matches whatever the spacing and casing', async () => {
+  const wallet = makeWallet();
+  const spacedLower = wallet.address.toLowerCase();
+  const lists = {
+    'compact, as wrangler.toml holds it': compEnv(wallet.addressCompact),
+    'spaced and lowercased': compEnv(spacedLower),
+    'in blocks, uppercase': compEnv(wallet.address),
+    'one of several, with junk and an empty entry beside it': compEnv(
+      'not-an-address',
+      '',
+      spacedLower,
+      PAYWALL_COMPACT,
+    ),
+  };
+
+  for (const [label, env] of Object.entries(lists)) {
+    reset();
+    upstreamHandler = deadUpstream();
+    const body = await (await signIn(wallet, {}, { env })).json();
+    assertEqual(body.entitled, true, `entitled for a list ${label}`);
+    assertEqual(body.comp, true, `comp for a list ${label}`);
+    assertEqual(upstreamCalls.length, 0, `upstream call count for a list ${label}`);
+  }
+
+  // The junk entries comp nobody: an empty list and a list of rubbish are the same
+  // thing, and a wallet reaches the chain as usual through both.
+  for (const [label, env] of Object.entries({
+    'an empty var': compEnv(''),
+    'a var of rubbish': compEnv('not-an-address', 'NQ00', 'undefined'),
+    'no var at all': ENV,
+  })) {
+    reset();
+    upstreamHandler = paywallUpstream({ txs: [txFixture({ from: wallet.address })] });
+    const body = await (await signIn(wallet, {}, { env })).json();
+    assertEqual(body.entitled, false, `entitled with ${label}`);
+    assertEqual(body.reason, 'no_payment', `reason with ${label}`);
+  }
+});
+
+await test('comp: POST /api/entitlement re-checks a comped wallet without a chain read', async () => {
+  const wallet = makeWallet();
+  const env = compEnv(wallet.addressCompact);
+  upstreamHandler = deadUpstream();
+
+  const authToken = mintTestToken('auth', wallet.addressCompact, NOW + HOUR_MS);
+  const res = await postEntitlementAs(authToken, { env });
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+
+  const body = await res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.comp, true, 'comp');
+  assertEqual(body.address, wallet.address, 'address (from the auth token)');
+  assertEqual(
+    body.token,
+    mintTestToken('sub', wallet.addressCompact, body.paidUntil),
+    'pass token',
+  );
+});
+
+await test('comp: GET /api/me with a comped pass token -> active, comp, no upstream call', async () => {
+  const wallet = makeWallet();
+  const paidUntil = NOW + COMP_PASS_MS;
+  const token = mintTestToken('sub', wallet.addressCompact, paidUntil);
+
+  const res = await callCounting('/api/me', {
+    headers: { Authorization: `Bearer ${token}` },
+    env: compEnv(wallet.addressCompact),
+  });
+  assertEqual(res.res.status, 200, 'status');
+  assertEqual(res.fetches, 0, 'upstream fetches');
+
+  const body = await res.res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.comp, true, 'comp');
+  assertEqual(body.address, wallet.address, 'address (re-spaced from the token)');
+  assertEqual(body.paidUntil, paidUntil, 'paidUntil');
+  assert(body.daysLeft > 36000, `daysLeft: got ${body.daysLeft}`);
+
+  // Taking the wallet off the list revokes the label on the very next call — the flag
+  // follows the var, not the token, so a token minted while comped stops claiming to be.
+  const revoked = await getMe(token);
+  const after = await revoked.json();
+  assertEqual(after.entitled, true, 'entitled after revocation (the token still stands)');
+  assertEqual(after.comp, undefined, 'comp after revocation');
 });
 
 await test('bad address -> 400 {"error":"invalid address"}', async () => {

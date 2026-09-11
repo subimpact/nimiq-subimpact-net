@@ -31,6 +31,7 @@ import {
   checkEntitlement,
   entitlementReasonMessage,
   fetchNonce,
+  passExpiryLabel,
   passFrom,
   verifySignature,
   type EntitlementResponse,
@@ -167,7 +168,8 @@ export function PaywallDialog({
       if (granted) {
         onEntitled(granted)
         setStep("done")
-        track("chainmap_unlock_success", { daysLeft: granted.daysLeft })
+        // A comped pass would otherwise report 36,500 days and skew every average.
+        track("chainmap_unlock_success", granted.comp ? { comp: true } : { daysLeft: granted.daysLeft })
         return true
       }
 
@@ -431,7 +433,8 @@ export function PaywallDialog({
                 <CheckIcon className="size-4" />
               </span>
               <p className="text-sm font-semibold">
-                Your pass is active — {pass.daysLeft} day{pass.daysLeft === 1 ? "" : "s"} left.
+                {pass.comp ? "Your owner pass is active" : "Your pass is active"} —{" "}
+                {passExpiryLabel(pass)}.
               </p>
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">
@@ -457,19 +460,21 @@ export function PaywallDialog({
               </CopyAddress>
               <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <div>
-                  <dt className="text-muted-foreground">Days left</dt>
+                  <dt className="text-muted-foreground">{pass.comp ? "Pass" : "Days left"}</dt>
                   <dd className="font-mono tabular-nums text-foreground" data-chainmap-days-left="">
-                    {pass.daysLeft}
+                    {pass.comp ? "Owner" : pass.daysLeft}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Expires</dt>
                   <dd className="font-mono text-[11px] tabular-nums text-foreground">
-                    {new Date(pass.paidUntil).toLocaleDateString("en-US", {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                    })}
+                    {pass.comp
+                      ? "Never"
+                      : new Date(pass.paidUntil).toLocaleDateString("en-US", {
+                          year: "numeric",
+                          month: "short",
+                          day: "numeric",
+                        })}
                   </dd>
                 </div>
               </dl>

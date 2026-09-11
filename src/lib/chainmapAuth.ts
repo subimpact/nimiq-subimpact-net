@@ -24,6 +24,12 @@ export interface Pass {
   paidUntil: number
   daysLeft: number
   token: string
+  /**
+   * A pass the operator granted rather than one the chain was paid for. It is an
+   * ordinary pass in every other respect — same token, same tier, same limits — but
+   * its `paidUntil` is a century out, so it is labelled rather than counted down.
+   */
+  comp: boolean
 }
 
 export interface NonceResponse {
@@ -42,6 +48,8 @@ export interface EntitlementResponse {
   daysLeft?: number
   token?: string
   authToken?: string
+  /** Present, and true, only for a comped wallet; a paid pass omits it entirely. */
+  comp?: boolean
   requiredLuna?: number
   priceUsd?: number
   paywallAddress?: string
@@ -178,7 +186,17 @@ export function passFrom(payload: EntitlementResponse, fallbackAddress?: string)
         ? payload.daysLeft
         : Math.max(0, Math.ceil((payload.paidUntil - Date.now()) / 86400000)),
     token: payload.token,
+    comp: payload.comp === true,
   }
+}
+
+/**
+ * What the pass has left, in words. A comped pass has a real expiry — a century out —
+ * but printing "36,500 days left" would be noise, so it says what it is instead.
+ */
+export function passExpiryLabel(pass: Pass): string {
+  if (pass.comp) return "no expiry"
+  return `${pass.daysLeft} day${pass.daysLeft === 1 ? "" : "s"} left`
 }
 
 export type AuthStatus = "loading" | "anonymous" | "entitled" | "expired"
@@ -223,6 +241,7 @@ export function useChainmapAuth(): ChainmapAuth {
             paidUntil: payload.paidUntil,
             daysLeft: payload.daysLeft ?? 0,
             token,
+            comp: payload.comp === true,
           })
           setStatus("entitled")
           return

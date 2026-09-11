@@ -139,6 +139,12 @@ const QUOTE_VALID_MINUTES = 60;
 // staging deploy can point elsewhere; the constant is the production answer.
 const PAYWALL_ADDRESS = 'NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC';
 
+// How long a comped pass runs. It is a real expiry rather than a null, so the comp
+// case travels through the same token, the same claims and the same client code as a
+// paid one — a century out is "never" for every purpose here, and still an ordinary
+// millisecond timestamp that a token can carry and a date can render.
+const COMP_PASS_MS = 100 * 365 * DAY_MS;
+
 // A pass runs 30 days from the timestamp of the payment transaction, not from when
 // the user first asks about it — the chain records when they paid.
 const ENTITLEMENT_DAYS = 30;
@@ -790,6 +796,30 @@ function paywallAddress(env) {
 }
 
 /**
+ * The wallets that hold a pass without having paid for one — the operator's own, and
+ * whoever else they decide to comp.
+ *
+ * The list is the COMP_ADDRESSES var, comma-separated. It is public data, not a secret:
+ * it names addresses, which the chain prints anyway, and naming one grants nothing on
+ * its own — the address still has to prove it holds its key on /api/auth/verify before
+ * this list is ever consulted. Editing the var is the whole of granting and revoking.
+ *
+ * Every entry is compacted, which both normalizes it and validates it: an entry that is
+ * not a Nimiq address compacts to '' and is dropped, so a typo comps nobody rather than
+ * matching something unintended.
+ */
+function compAddresses(env) {
+  const raw = env && typeof env.COMP_ADDRESSES === 'string' ? env.COMP_ADDRESSES : '';
+  return new Set(raw.split(',').map(compactAddress).filter(Boolean));
+}
+
+/** Is this address comped? Both sides compacted, so spacing and casing cannot matter. */
+function isCompAddress(address, env) {
+  const compact = compactAddress(address);
+  return compact !== '' && compAddresses(env).has(compact);
+}
+
+/**
  * getTransactionsByAddress on the public RPC node.
  *
  * Like sendRawTransaction, the node answers HTTP 200 whether it understood the request
@@ -1329,10 +1359,21 @@ async function findNewestPayment(address, target, minimumLuna) {
  * their own `requiredLuna` could buy the pass for a luna. PAYMENT_TOLERANCE then allows
  * for NIM having moved between the quote the user signed and this moment.
  *
+ * A comped address is answered before any of that and never reaches it: no price, no
+ * history walk, no 30-day window. That ordering is the feature, not an optimisation — a
+ * comp pass is the one that has to work when CoinGecko is refusing Cloudflare and the RPC
+ * node is down, and it cannot depend on the upstreams it exists to be independent of.
+ *
  * Returns `{status: 'upstream' | 'unpaid' | 'paid', …}`; the callers shape the JSON,
- * because the two routes answer in different envelopes.
+ * because the two routes answer in different envelopes. `comp: true` rides along on the
+ * paid answer purely so the client can say "no expiry" instead of counting out 36,500
+ * days — everything else downstream reads the status and sees an ordinary pass.
  */
 async function resolveEntitlement(address, env) {
+  if (isCompAddress(address, env)) {
+    return { status: 'paid', comp: true, paidUntil: Date.now() + COMP_PASS_MS };
+  }
+
   const priceUsd = await fetchNimPriceUsd();
   if (priceUsd === null) return { status: 'upstream' };
 
@@ -1452,8 +1493,12 @@ async function verifySignIn(request, env) {
       ...entitlementWindow(entitlement.paidUntil),
       token: await mintToken('sub', addressCompact, entitlement.paidUntil, secret),
       authToken,
-      requiredLuna: entitlement.requiredLuna,
-      priceUsd: entitlement.priceUsd,
+      // A comp pass was never priced, so it quotes no price: `comp` stands where
+      // requiredLuna and priceUsd would be, and the client shows no expiry rather than
+      // the century this pass nominally runs for.
+      ...(entitlement.comp
+        ? { comp: true }
+        : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
     },
     200,
   );
@@ -1504,8 +1549,9 @@ async function checkEntitlement(request, env) {
       address,
       ...entitlementWindow(entitlement.paidUntil),
       token: await mintToken('sub', claims.addressCompact, entitlement.paidUntil, secret),
-      requiredLuna: entitlement.requiredLuna,
-      priceUsd: entitlement.priceUsd,
+      ...(entitlement.comp
+        ? { comp: true }
+        : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
     },
     200,
   );
@@ -1519,6 +1565,11 @@ async function checkEntitlement(request, env) {
  * pass is a 401. A `sub` token that is genuine but describes a pass that has run out is a
  * 200 saying so: the client is authenticated, it simply has nothing left, and the
  * difference tells it whether to show "connect wallet" or "renew".
+ *
+ * The comp list is re-read here rather than baked into the token, so the flag always
+ * describes the list as it stands now. It changes only how the pass is labelled — the
+ * token's own expiry still decides whether there is one, which is what keeps this route
+ * free of any chain read at all.
  */
 async function currentEntitlement(request, env) {
   const secret = env && env.CHAINMAP_TOKEN_SECRET;
@@ -1535,6 +1586,7 @@ async function currentEntitlement(request, env) {
     {
       entitled: true,
       address: normalizeAddress(claims.addressCompact),
+      ...(isCompAddress(claims.addressCompact, env) ? { comp: true } : {}),
       ...entitlementWindow(claims.expiresAt),
     },
     200,

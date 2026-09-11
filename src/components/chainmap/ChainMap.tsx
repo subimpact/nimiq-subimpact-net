@@ -273,6 +273,7 @@ export function ChainMap() {
               tier={tier}
               expired={auth.status === "expired"}
               daysLeft={auth.pass?.daysLeft ?? 0}
+              comp={auth.pass?.comp ?? false}
               address={auth.pass?.address ?? null}
               onClick={() => openPaywall(tier === "paid" ? "manage" : "unlock")}
             />
@@ -463,12 +464,15 @@ function TierBadge({
   tier,
   expired,
   daysLeft,
+  comp,
   address,
   onClick,
 }: {
   tier: "free" | "paid"
   expired: boolean
   daysLeft: number
+  /** An operator-granted pass: same tier, but there is no countdown to show. */
+  comp: boolean
   address: string | null
   onClick: () => void
 }) {
@@ -493,10 +497,14 @@ function TierBadge({
         </>
       ) : tier === "paid" ? (
         <>
-          <span className="font-semibold">Pass</span>
-          <span className="font-mono tabular-nums">
-            {daysLeft} day{daysLeft === 1 ? "" : "s"} left
-          </span>
+          <span className="font-semibold">{comp ? "Owner pass" : "Pass"}</span>
+          {comp ? (
+            <span>no expiry</span>
+          ) : (
+            <span className="font-mono tabular-nums">
+              {daysLeft} day{daysLeft === 1 ? "" : "s"} left
+            </span>
+          )}
           {address && <span className="font-mono opacity-70">{shortAddress(address, 4)}</span>}
         </>
       ) : (
