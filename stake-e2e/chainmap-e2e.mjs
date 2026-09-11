@@ -283,6 +283,26 @@ assert(
   'the free tier reads 20 transactions per address',
 )
 
+// --- changing depth on a drawn map re-runs it -------------------------------
+// Everything above went through the helper, which clears the map first; these are
+// the first depth clicks made while a map is on screen — the ones the picker is
+// supposed to act on.
+await free.locator('[data-nimmap-depth="1"]').click()
+await free.waitForFunction(
+  () => (document.querySelector('[data-nimmap-counts]')?.innerText ?? '').includes('3 addresses'),
+  null,
+  { timeout: 30000 },
+)
+assert(true, 'picking depth 1 on a drawn map re-scans it shallower')
+
+await free.locator('[data-nimmap-depth="3"]').click()
+await free.waitForFunction(
+  () => (document.querySelector('[data-nimmap-counts]')?.innerText ?? '').includes('15 addresses'),
+  null,
+  { timeout: 30000 },
+)
+assert(true, 'picking depth 3 re-scans it back to the original map')
+
 // --- the boundary ----------------------------------------------------------
 assert(
   await free.locator('[data-nimmap-limit="depth"]').isVisible(),
@@ -321,6 +341,27 @@ assert(
 assert(
   (await legend.locator('svg polygon').count()) === 4,
   'the node key is four hexagons — seed, address, contract, edge of scan',
+)
+
+// The legend lives in the top-right corner, to the left of the labels toggle.
+const labelsToggle = free.locator('[data-nimmap-labels-toggle]')
+const legendBox = await legend.boundingBox()
+const toggleBox = await labelsToggle.boundingBox()
+assert(
+  Boolean(
+    legendBox &&
+      toggleBox &&
+      legendBox.x + legendBox.width <= toggleBox.x + 1 &&
+      Math.abs(legendBox.y - toggleBox.y) <= 12,
+  ),
+  `the legend sits before the labels toggle in the top-right corner (legend right ${Math.round((legendBox?.x ?? 0) + (legendBox?.width ?? 0))}, toggle left ${Math.round(toggleBox?.x ?? -1)})`,
+)
+const swatchFills = await legend
+  .locator('svg polygon')
+  .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('fill')))
+assert(
+  Boolean(swatchFills[1] && swatchFills[2] && swatchFills[1] !== swatchFills[2]),
+  `address and contract swatches are different colours (${swatchFills[1]} vs ${swatchFills[2]})`,
 )
 
 await legend.locator('[data-nimmap-colorby="age"]').click()

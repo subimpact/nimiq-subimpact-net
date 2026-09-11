@@ -195,6 +195,17 @@ export function NimMap() {
 
   const scanning = status === "scanning"
 
+  // Picking a depth while a map is drawn re-runs that map at the new depth — without
+  // this the control reads as dead: the highlight moves but nothing else does. A
+  // cleared map skips the rescan; the depth then applies to the next Scan.
+  const pickDepth = useCallback(
+    (value: number) => {
+      setDepth(value)
+      if (model && !scanning && value !== depth) runScan(model.meta.seed, value)
+    },
+    [model, scanning, depth, runScan],
+  )
+
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-xl border border-border bg-card/30">
@@ -249,7 +260,7 @@ export function NimMap() {
             depth={depth}
             maxDepth={limits.maxDepth}
             disabled={scanning}
-            onPick={setDepth}
+            onPick={pickDepth}
             onLocked={() => openPaywall("unlock")}
           />
 
@@ -332,15 +343,6 @@ export function NimMap() {
                 </span>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setShowLabels((on) => !on)}
-                aria-pressed={showLabels}
-                className="absolute top-3 right-3 z-10 cursor-pointer rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
-              >
-                {showLabels ? "Hide labels" : "Show labels"}
-              </button>
-
               {hover && !selectedNode && !selectedEdge && <Tooltip hover={hover} />}
 
               {selectedNode && (
@@ -356,11 +358,24 @@ export function NimMap() {
                 <EdgeDetail edge={selectedEdge} onClose={() => setSelectedEdgeHash(null)} />
               )}
 
-              <Legend
-                mode={colorMode}
-                onMode={setColorMode}
-                yielding={Boolean(selectedNode || selectedEdge)}
-              />
+              {/* The legend and the labels toggle share the top-right corner: the
+                  legend reads first, the toggle keeps the corner itself. */}
+              <div className="absolute top-3 right-3 z-20 flex items-start gap-2">
+                <Legend
+                  mode={colorMode}
+                  onMode={setColorMode}
+                  yielding={Boolean(selectedNode || selectedEdge)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowLabels((on) => !on)}
+                  aria-pressed={showLabels}
+                  data-nimmap-labels-toggle=""
+                  className="cursor-pointer rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur transition-colors hover:text-foreground"
+                >
+                  {showLabels ? "Hide labels" : "Show labels"}
+                </button>
+              </div>
             </>
           ) : (
             <EmptyState
@@ -706,9 +721,9 @@ function Legend({
   mode: ColorMode
   onMode: (mode: ColorMode) => void
   /**
-   * A detail panel is open. It sits bottom-left and, on a phone, is as wide as the
-   * canvas — so down there the legend gets out of its way rather than sitting on top
-   * of the thing the reader just asked to see.
+   * A detail panel is open. On a phone it is as wide as the canvas, so there the
+   * legend gets out of its way rather than sitting on top of the thing the reader
+   * just asked to see; a desktop has room for both.
    */
   yielding: boolean
 }) {
@@ -717,7 +732,7 @@ function Legend({
   const [open, setOpen] = useState(
     () => typeof window === "undefined" || window.matchMedia("(min-width: 640px)").matches,
   )
-  const place = cn("absolute right-3 bottom-3 z-20", yielding && "hidden sm:block")
+  const place = cn(yielding && "hidden sm:block")
 
   if (!open) {
     return (
@@ -741,7 +756,7 @@ function Legend({
       data-nimmap-legend=""
       className={cn(
         place,
-        "max-w-[calc(100%-1.5rem)] rounded-lg bg-background/85 px-3 py-2 backdrop-blur sm:max-w-xs",
+        "max-w-[calc(100vw-8rem)] rounded-lg bg-background/85 px-3 py-2 backdrop-blur sm:max-w-xs",
       )}
     >
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">

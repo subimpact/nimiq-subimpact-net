@@ -19,7 +19,7 @@ import type { MapEdge, MapGraphEdge, MapGraphNode, MapModel, ScanResult } from "
 
 export const SEED_COLOR = "#07c1ff"
 export const NODE_COLOR = "#a1a1aa"
-export const CONTRACT_COLOR = "#71717a"
+export const CONTRACT_COLOR = "#fb923c"
 
 const MIN_RADIUS = 6
 const MAX_RADIUS = 30
