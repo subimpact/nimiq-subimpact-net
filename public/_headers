@@ -5,6 +5,8 @@
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
 
-# Static assets cache
+# Static assets cache — bounded TTL: Cloudflare Pages answers missing files with
+# index.html (200) during deploy propagation, and an immutable cache would pin
+# that broken response for a year. 300s heals any such poison in minutes.
 /_astro/*
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: public, max-age=300
