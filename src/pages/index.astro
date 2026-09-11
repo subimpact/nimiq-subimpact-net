@@ -21,7 +21,9 @@ function fmtNim(luna: number): string {
 
 <Layout>
   <!-- Hero: split, left pitch / right live stats -->
-  <section class="mx-auto grid max-w-6xl gap-10 px-4 pt-16 pb-14 md:grid-cols-2 md:items-center md:pt-20">
+  <!-- Past xl the right card stops growing with the shell: the pitch takes the
+       extra width, the stat card keeps roughly the proportions it has today. -->
+  <section class="mx-auto grid w-full max-w-[1600px] gap-10 px-4 pt-16 pb-14 md:grid-cols-2 md:items-center md:px-8 md:pt-20 xl:grid-cols-[minmax(0,1fr)_minmax(0,32rem)] xl:gap-16 xl:px-10">
     <div>
       <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">Nimiq validator</p>
       <h1 class="text-4xl font-bold leading-none tracking-tighter md:text-5xl">0% fee.<br />Maximum returns.</h1>
@@ -71,23 +73,23 @@ function fmtNim(luna: number): string {
 
   <!-- Why ImpactZero: three facts, no cards -->
   <section class="border-t border-border/80">
-    <div class="mx-auto max-w-6xl px-4 py-14">
+    <div class="mx-auto w-full max-w-[1600px] px-4 py-14 md:px-8 xl:px-10">
       <h2 class="text-2xl font-bold tracking-tight">Why stake with ImpactZero</h2>
       <div class="mt-8 grid gap-10 md:grid-cols-3">
         <div>
           <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Fee</p>
           <p class="mt-2 text-lg font-semibold">0% forever</p>
-          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Every reward goes to you. No commission, no hidden cuts, no fee creep later.</p>
+          <p class="mt-1.5 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">Every reward goes to you. No commission, no hidden cuts, no fee creep later.</p>
         </div>
         <div>
           <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Payouts</p>
           <p class="mt-2 text-lg font-semibold">Restake, automatic</p>
-          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Rewards are restaked automatically, compounding your position without any action.</p>
+          <p class="mt-1.5 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">Rewards are restaked automatically, compounding your position without any action.</p>
         </div>
         <div>
           <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Hosting</p>
           <p class="mt-2 text-lg font-semibold">Eco-friendly uptime</p>
-          <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">Efficient infrastructure keeps the node online with a small footprint.</p>
+          <p class="mt-1.5 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">Efficient infrastructure keeps the node online with a small footprint.</p>
         </div>
       </div>
     </div>
@@ -95,12 +97,12 @@ function fmtNim(luna: number): string {
 
   <!-- Mini Apps -->
   <section id="apps" class="border-t border-border/80">
-    <div class="mx-auto max-w-6xl px-4 py-14">
+    <div class="mx-auto w-full max-w-[1600px] px-4 py-14 md:px-8 xl:px-10">
       <h2 class="text-2xl font-bold tracking-tight">Built for the Nimiq ecosystem</h2>
       <p class="mt-2 max-w-[60ch] text-sm text-muted-foreground">
         Two mini apps, live in any browser and inside Nimiq Pay. Open source, MIT.
       </p>
-      <div class="mt-8 grid gap-6 md:grid-cols-2">
+      <div class="mt-8 grid gap-6 md:grid-cols-2 xl:gap-8">
         <Card class="overflow-hidden">
           <a href="https://nimbooks.subimpact.net" target="_blank" rel="noopener" class="group block">
             <div class="relative aspect-[16/9] overflow-hidden bg-zinc-900">
@@ -147,7 +149,7 @@ function fmtNim(luna: number): string {
 
   <!-- Status -->
   <section id="status" class="border-t border-border/80">
-    <div class="mx-auto max-w-6xl px-4 py-14">
+    <div class="mx-auto w-full max-w-[1600px] px-4 py-14 md:px-8 xl:px-10">
       <h2 class="text-2xl font-bold tracking-tight">Validator status</h2>
       <Card class="mt-6">
         <CardContent class="px-6 py-6">
@@ -171,7 +173,7 @@ function fmtNim(luna: number): string {
               initialEpoch={null}
             />
           </div>
-          <p class="mt-5 border-t border-border pt-4 text-sm text-muted-foreground">
+          <p class="mt-5 max-w-[84ch] border-t border-border pt-4 text-sm text-muted-foreground">
             The validator is live on-chain. The node is running, synced, and registered in the official Nimiq Validators API. Delegation is open — stake with ImpactZero for 0% fees.
           </p>
           <div class="mt-4 flex flex-wrap items-center gap-3">
@@ -186,7 +188,7 @@ function fmtNim(luna: number): string {
 
   <!-- CTA -->
   <section class="border-t border-border/80">
-    <div class="mx-auto max-w-6xl px-4 py-14 text-center">
+    <div class="mx-auto w-full max-w-[1600px] px-4 py-14 text-center md:px-8 xl:px-10">
       <h2 class="text-2xl font-bold tracking-tight">Ready to stake?</h2>
       <p class="mx-auto mt-2 max-w-[52ch] text-sm text-muted-foreground">Stake right here — connect your account, pick an amount, confirm in the Nimiq Hub, and keep 100% of your rewards.</p>
       <Button asChild size="lg" class="mt-6">

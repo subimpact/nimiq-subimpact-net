@@ -240,7 +240,7 @@ export function DelegationGraph() {
         </div>
 
         <div className="grid lg:grid-cols-[minmax(0,1fr)_18rem]">
-          <div className="relative h-[26rem] border-b border-border sm:h-[32rem] lg:h-[38rem] lg:border-b-0 lg:border-r">
+          <div className="relative h-[26rem] border-b border-border sm:h-[32rem] lg:h-[calc(100vh-13rem)] lg:min-h-[40rem] lg:border-b-0 lg:border-r">
             <HexGraphCanvas
               model={model}
               view={view}
@@ -483,8 +483,9 @@ function ClusterList({
   activeCluster: number | null
   onPick: (cluster: Cluster) => void
 }) {
+  // The cap tracks the map height so the list fills the row and scrolls inside it.
   return (
-    <aside className="flex max-h-[26rem] flex-col lg:max-h-[38rem]">
+    <aside className="flex max-h-[26rem] flex-col lg:max-h-[max(40rem,calc(100vh-13rem))]">
       <div className="flex items-baseline justify-between border-b border-border px-3 py-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Validators</h2>
         <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{clusters.length}</span>
@@ -540,12 +541,12 @@ function GraphSkeleton() {
       <div className="overflow-hidden rounded-xl border border-border">
         <Skeleton className="h-12 w-full rounded-none" />
         <div className="grid lg:grid-cols-[minmax(0,1fr)_18rem]">
-          <div className="flex h-[26rem] items-center justify-center sm:h-[32rem] lg:h-[38rem]">
+          <div className="flex h-[26rem] items-center justify-center sm:h-[32rem] lg:h-[calc(100vh-13rem)] lg:min-h-[40rem]">
             <p className="font-mono text-xs text-muted-foreground">
               Loading delegation data from {API_HOST}…
             </p>
           </div>
-          <Skeleton className="hidden h-[38rem] rounded-none lg:block" />
+          <Skeleton className="hidden rounded-none lg:block lg:h-[calc(100vh-13rem)] lg:min-h-[40rem]" />
         </div>
       </div>
     </div>
