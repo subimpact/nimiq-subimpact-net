@@ -7,6 +7,7 @@
  *   node worker/test-local.mjs
  */
 
+import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const ORIGIN = 'https://nimiq.subimpact.net';
@@ -153,6 +154,131 @@ function postBroadcast(body) {
   });
 }
 
+// --- ChainMap paywall fixtures ---------------------------------------------
+
+const COINGECKO_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=nimiq-2&vs_currencies=usd';
+const PAYWALL_ADDRESS = 'NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC';
+const PAYWALL_COMPACT = PAYWALL_ADDRESS.replace(/\s+/g, '');
+// Not the deployed secret: that one is a wrangler secret and lives nowhere in this repo.
+const TOKEN_SECRET = 'test-secret-not-the-deployed-one';
+/** The bindings the worker reads off `env`; wrangler supplies these in production. */
+const ENV = { PAYWALL_ADDRESS, CHAINMAP_TOKEN_SECRET: TOKEN_SECRET };
+
+// The fixture price and the amounts derived from it, worked out here rather than read
+// back from the worker — these literals are what the arithmetic is being checked against.
+//   $29.99 / $0.0004 per NIM      = 74,975 NIM
+//   74,975 NIM x 100,000 luna/NIM = 7,497,500,000 luna
+//   85% tolerance floor           = 6,372,875,000 luna
+const PRICE_USD = 0.0004;
+const REQUIRED_NIM = 74975;
+const REQUIRED_LUNA = 7497500000;
+const TOLERANCE_FLOOR_LUNA = 6372875000;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = Date.now();
+const RECENT_PAYMENT_MS = NOW - 2 * DAY_MS;
+const STALE_PAYMENT_MS = NOW - 31 * DAY_MS;
+
+const HISTORY_HASH_1 = 'a'.repeat(64);
+const HISTORY_HASH_2 = 'b'.repeat(64);
+const CURSOR_HASH = 'c1d2'.repeat(16);
+
+/**
+ * One transaction in the shape rpc.nimiqwatch.com actually returns, noise included:
+ * fromType/toType and the senderData/recipientData blobs the worker is expected to drop.
+ */
+function txFixture(overrides = {}) {
+  return {
+    hash: HISTORY_HASH_1,
+    blockNumber: 61301932,
+    timestamp: RECENT_PAYMENT_MS,
+    confirmations: 14148,
+    size: 152,
+    relatedAddresses: [ADDRESS, STAKER_A1],
+    from: ADDRESS,
+    fromType: 0,
+    to: STAKER_A1,
+    toType: 0,
+    value: 100000,
+    fee: 138,
+    senderData: '',
+    recipientData: 'de'.repeat(300),
+    ...overrides,
+  };
+}
+
+/** A payment of `value` luna to the paywall address; `to` overridable to test matching. */
+function paymentFixture(value, overrides = {}) {
+  return txFixture({ hash: HISTORY_HASH_2, to: PAYWALL_ADDRESS, value, ...overrides });
+}
+
+/**
+ * The paywall's two upstreams: CoinGecko's price feed and the RPC node's
+ * getTransactionsByAddress. Like sendRawTransaction, the node answers HTTP 200 for a
+ * request it rejected, with the detail in `error.data` (`opts.rejection`).
+ */
+function paywallUpstream(opts = {}) {
+  return (url, init) => {
+    if (url === COINGECKO_URL) {
+      if (opts.priceFails) return new Response('rate limited', { status: 429 });
+      if (opts.priceThrows) throw new Error('connection refused');
+      if (opts.priceGarbage) return jsonUpstream({ 'nimiq-2': {} });
+      return jsonUpstream({ 'nimiq-2': { usd: opts.priceUsd ?? PRICE_USD } });
+    }
+    if (url !== RPC_URL) return new Response('not found', { status: 404 });
+    const sent = JSON.parse(init.body);
+    if (sent.method !== 'getTransactionsByAddress') return new Response('not found', { status: 404 });
+    if (opts.historyThrows) throw new Error('connection refused');
+    if (opts.historyHttpFail) return new Response('service unavailable', { status: 503 });
+    if (opts.rejection) {
+      return jsonUpstream({
+        jsonrpc: '2.0',
+        error: { code: -32602, message: 'Internal error', data: opts.rejection },
+        id: 1,
+      });
+    }
+    return jsonUpstream({ jsonrpc: '2.0', result: { data: opts.txs ?? [], metadata: null }, id: 1 });
+  };
+}
+
+/** The params of the last getTransactionsByAddress call, or null if there was none. */
+function lastHistoryParams() {
+  for (let i = upstreamCalls.length - 1; i >= 0; i--) {
+    if (upstreamCalls[i].url !== RPC_URL) continue;
+    const sent = JSON.parse(upstreamCalls[i].init.body);
+    if (sent.method === 'getTransactionsByAddress') return sent.params;
+  }
+  return null;
+}
+
+function postEntitlement(body, headers = {}) {
+  return call('/api/entitlement', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
+function getMe(token) {
+  return call('/api/me', token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+}
+
+/**
+ * A pass token minted here, independently of the worker: base64url of
+ * "<compact address>.<paidUntil>.<hex HMAC-SHA256>". Signing it from the test rather
+ * than reusing the worker's own helper is what makes the format an assertion.
+ */
+function mintTestToken(addressCompact, paidUntil, secret = TOKEN_SECRET) {
+  const payload = `${addressCompact}.${paidUntil}`;
+  const signature = createHmac('sha256', secret).update(payload).digest('hex');
+  return Buffer.from(`${payload}.${signature}`).toString('base64url');
+}
+
+/** Rebuild a token from its decoded parts, so a test can edit one of them. */
+function forgeToken(parts) {
+  return Buffer.from(parts.join('.')).toString('base64url');
+}
+
 // --- /api/graph at mainnet scale -------------------------------------------
 //
 // Workers Free allows 50 units per invocation, and fetch() shares that quota with
@@ -241,11 +367,14 @@ const ctx = { waitUntil: (promise) => promise.catch(() => {}) };
 const workerUrl = pathToFileURL(new URL('./src/index.js', import.meta.url).pathname).href;
 const worker = (await import(workerUrl)).default;
 
-/** Sends the allowlisted Origin unless one is given, or `init.omitOrigin` drops it. */
+/**
+ * Sends the allowlisted Origin unless one is given, or `init.omitOrigin` drops it.
+ * `init.env` overrides the bindings for a test that needs one missing.
+ */
 function call(path, init = {}) {
   const headers = new Headers(init.headers || {});
   if (!init.omitOrigin && !headers.has('Origin')) headers.set('Origin', ORIGIN);
-  return worker.fetch(new Request(`${BASE}${path}`, { ...init, headers }), {}, ctx);
+  return worker.fetch(new Request(`${BASE}${path}`, { ...init, headers }), init.env || ENV, ctx);
 }
 
 /** One worker invocation, plus how many upstream fetches it made. */
@@ -309,7 +438,8 @@ await test('OPTIONS preflight -> 204 + CORS headers', async () => {
   assertEqual(res.status, 204, 'status');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
   assertEqual(res.headers.get('Access-Control-Allow-Methods'), 'GET, POST, OPTIONS', 'ACAM');
-  assertEqual(res.headers.get('Access-Control-Allow-Headers'), 'Content-Type', 'ACAH');
+  // Authorization is allowed so the browser may send the ChainMap pass on /api/me.
+  assertEqual(res.headers.get('Access-Control-Allow-Headers'), 'Content-Type, Authorization', 'ACAH');
   assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
 });
 
@@ -904,6 +1034,541 @@ await test('GET /api/graph survives a missing validator-names API', async () => 
   assertEqual(body.validators.length, 2, 'validator count');
   assertEqual(body.validators[0].name, undefined, 'no name when enrichment fails');
   assertEqual(body.stakers.length, 2, 'staker count');
+});
+
+// --- ChainMap paywall: /api/history ----------------------------------------
+
+await test('GET /api/history/:address -> normalized page, nextStartAt on a full page', async () => {
+  upstreamHandler = paywallUpstream({
+    txs: [txFixture(), txFixture({ hash: HISTORY_HASH_2, value: 250000 })],
+  });
+  const res = await call(`/api/history/${ADDRESS_ENCODED}?max=2`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+
+  assertEqual(upstreamCalls.length, 1, 'upstream call count');
+  assertEqual(upstreamCalls[0].url, RPC_URL, 'upstream URL');
+  assertEqual(upstreamCalls[0].init.method, 'POST', 'upstream method');
+  assertEqual(
+    upstreamCalls[0].init.headers['User-Agent'],
+    'nimiq-api/1.0 (+https://nimiq.subimpact.net)',
+    'User-Agent',
+  );
+  const sent = JSON.parse(upstreamCalls[0].init.body);
+  assertEqual(sent.method, 'getTransactionsByAddress', 'RPC method');
+  assertEqual(JSON.stringify(sent.params), JSON.stringify([ADDRESS, 2, null]), 'RPC params');
+
+  const body = await res.json();
+  assertEqual(body.data.length, 2, 'data length');
+  const [first] = body.data;
+  assertEqual(first.hash, HISTORY_HASH_1, 'data[0].hash');
+  assertEqual(first.blockNumber, 61301932, 'data[0].blockNumber');
+  assertEqual(first.timestamp, RECENT_PAYMENT_MS, 'data[0].timestamp');
+  assertEqual(first.confirmations, 14148, 'data[0].confirmations');
+  assertEqual(first.size, 152, 'data[0].size');
+  assertEqual(first.from, ADDRESS, 'data[0].from');
+  assertEqual(first.to, STAKER_A1, 'data[0].to');
+  assertEqual(first.value, 100000, 'data[0].value');
+  assertEqual(first.fee, 138, 'data[0].fee');
+  // The node's payload noise never reaches the client, nor the cache entry.
+  assertEqual(first.recipientData, undefined, 'data[0].recipientData (dropped)');
+  assertEqual(first.relatedAddresses, undefined, 'data[0].relatedAddresses (dropped)');
+  assertEqual(first.fromType, undefined, 'data[0].fromType (dropped)');
+
+  // A page as long as `max` means there is probably more behind it.
+  assertEqual(body.pagination.nextStartAt, HISTORY_HASH_2, 'pagination.nextStartAt');
+});
+
+await test('GET /api/history/:address -> nextStartAt null on a short page', async () => {
+  upstreamHandler = paywallUpstream({ txs: [txFixture()] });
+  const res = await call(`/api/history/${ADDRESS_ENCODED}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(JSON.stringify(lastHistoryParams()), JSON.stringify([ADDRESS, 20, null]), 'RPC params (default max)');
+  const body = await res.json();
+  assertEqual(body.data.length, 1, 'data length');
+  assertEqual(body.pagination.nextStartAt, null, 'pagination.nextStartAt');
+});
+
+await test('GET /api/history/:address?startAt= passes the cursor to the node', async () => {
+  upstreamHandler = paywallUpstream({ txs: [txFixture()] });
+  const res = await call(`/api/history/${ADDRESS_ENCODED}?max=5&startAt=${CURSOR_HASH}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(
+    JSON.stringify(lastHistoryParams()),
+    JSON.stringify([ADDRESS, 5, CURSOR_HASH]),
+    'RPC params',
+  );
+});
+
+await test('GET /api/history/:address (unspaced, lowercase) -> normalized upstream address', async () => {
+  upstreamHandler = paywallUpstream({ txs: [] });
+  const res = await call(`/api/history/${ADDRESS.replace(/\s+/g, '').toLowerCase()}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(lastHistoryParams()[0], ADDRESS, 'RPC address param');
+  const body = await res.json();
+  assertEqual(body.data.length, 0, 'data length');
+  assertEqual(body.pagination.nextStartAt, null, 'pagination.nextStartAt');
+});
+
+await test('GET /api/history/:address drops rows that are not transactions', async () => {
+  upstreamHandler = paywallUpstream({
+    txs: [
+      txFixture(),
+      { hash: HISTORY_HASH_2, from: ADDRESS, to: STAKER_A1 }, // no value
+      { blockNumber: 1, from: ADDRESS, to: STAKER_A1, value: 5 }, // no hash
+      { hash: HISTORY_HASH_2, to: STAKER_A1, value: 5 }, // no from
+      null,
+    ],
+  });
+  const res = await call(`/api/history/${ADDRESS_ENCODED}`);
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.data.length, 1, 'data length (only the complete transaction)');
+  assertEqual(body.data[0].hash, HISTORY_HASH_1, 'data[0].hash');
+});
+
+await test('GET /api/history with a bad address -> 400, no upstream call', async () => {
+  upstreamHandler = paywallUpstream();
+  const res = await call('/api/history/NOTANADDRESS');
+  assertEqual(res.status, 400, 'status');
+  assertEqual((await res.json()).error, 'invalid address', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('GET /api/history with a bad startAt -> 400, no upstream call', async () => {
+  upstreamHandler = paywallUpstream();
+  // The node's cursor is a 64-char lowercase hex hash; anything else it would reject
+  // itself, so it is turned away before it costs a subrequest.
+  const bad = ['abc', '', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), `${'a'.repeat(62)}zz`];
+  for (const value of bad) {
+    const res = await call(`/api/history/${ADDRESS_ENCODED}?startAt=${value}`);
+    assertEqual(res.status, 400, `status for startAt=${JSON.stringify(value)}`);
+    assertEqual((await res.json()).error, 'invalid startAt', `body.error for startAt=${JSON.stringify(value)}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('GET /api/history with max out of range -> 400, no upstream call', async () => {
+  upstreamHandler = paywallUpstream();
+  for (const value of ['51', '0', '100', 'abc', '', '-1', '2.5']) {
+    const res = await call(`/api/history/${ADDRESS_ENCODED}?max=${value}`);
+    assertEqual(res.status, 400, `status for max=${JSON.stringify(value)}`);
+    assertEqual((await res.json()).error, 'invalid max', `body.error for max=${JSON.stringify(value)}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+
+  // The edges of the range are accepted.
+  upstreamHandler = paywallUpstream({ txs: [] });
+  for (const value of ['1', '50']) {
+    const res = await call(`/api/history/${ADDRESS_ENCODED}?max=${value}`);
+    assertEqual(res.status, 200, `status for max=${value}`);
+    assertEqual(lastHistoryParams()[1], Number(value), `RPC max param for max=${value}`);
+  }
+});
+
+await test('GET /api/history with the node unreachable -> 502', async () => {
+  upstreamHandler = paywallUpstream({ historyThrows: true });
+  const thrown = await call(`/api/history/${ADDRESS_ENCODED}`);
+  assertEqual(thrown.status, 502, 'status for a transport failure');
+  assertEqual((await thrown.json()).error, 'upstream', 'body.error');
+
+  reset();
+  upstreamHandler = paywallUpstream({ historyHttpFail: true });
+  const httpFail = await call(`/api/history/${ADDRESS_ENCODED}`);
+  assertEqual(httpFail.status, 502, 'status for an HTTP failure');
+  assertEqual((await httpFail.json()).error, 'upstream', 'body.error');
+});
+
+await test("GET /api/history passes the node's rejection through -> 400", async () => {
+  upstreamHandler = paywallUpstream({
+    rejection: 'Serialization error: Hit the end of buffer, expected more data',
+  });
+  const res = await call(`/api/history/${ADDRESS_ENCODED}?startAt=${CURSOR_HASH}`);
+  assertEqual(res.status, 400, 'status');
+  assertEqual(
+    (await res.json()).error,
+    'Serialization error: Hit the end of buffer, expected more data',
+    'body.error (the node message, verbatim)',
+  );
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('GET /api/history is cached per address + max + startAt', async () => {
+  upstreamHandler = paywallUpstream({ txs: [txFixture()] });
+  await call(`/api/history/${ADDRESS_ENCODED}?max=5`);
+
+  const repeat = await callCounting(`/api/history/${ADDRESS_ENCODED}?max=5`);
+  assertEqual(repeat.fetches, 0, 'upstream fetches on a cache hit');
+  assertEqual((await repeat.res.json()).data[0].hash, HISTORY_HASH_1, 'cached body');
+
+  // A different page of the same address must not be served from that entry.
+  const otherMax = await callCounting(`/api/history/${ADDRESS_ENCODED}?max=6`);
+  assertEqual(otherMax.fetches, 1, 'upstream fetches for a different max');
+  const otherCursor = await callCounting(`/api/history/${ADDRESS_ENCODED}?max=5&startAt=${CURSOR_HASH}`);
+  assertEqual(otherCursor.fetches, 1, 'upstream fetches for a different startAt');
+  const otherAddress = await callCounting(`/api/history/${encodeURIComponent(STAKER_A1)}?max=5`);
+  assertEqual(otherAddress.fetches, 1, 'upstream fetches for a different address');
+
+  // A rejection is not cached: the next caller must reach the node again.
+  reset();
+  upstreamHandler = paywallUpstream({ rejection: 'unknown transaction hash' });
+  await call(`/api/history/${ADDRESS_ENCODED}?max=5`);
+  const again = await callCounting(`/api/history/${ADDRESS_ENCODED}?max=5`);
+  assertEqual(again.res.status, 400, 'status');
+  assertEqual(again.fetches, 1, 'upstream fetches after a rejection');
+});
+
+// --- ChainMap paywall: /api/quote ------------------------------------------
+
+await test('GET /api/quote -> $29.99 priced in luna at the CoinGecko rate', async () => {
+  upstreamHandler = paywallUpstream();
+  const res = await call('/api/quote');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length, 1, 'upstream call count');
+  assertEqual(upstreamCalls[0].url, COINGECKO_URL, 'upstream URL');
+
+  const body = await res.json();
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.usdTarget, 29.99, 'usdTarget');
+  // $29.99 / $0.0004 = 74,975 NIM; x 100,000 luna = 7,497,500,000 luna.
+  assertEqual(body.nimAmount, REQUIRED_NIM, 'nimAmount');
+  assertEqual(body.lunaAmount, REQUIRED_LUNA, 'lunaAmount');
+  assertEqual(body.lunaAmount, body.nimAmount * 100000, 'lunaAmount vs nimAmount');
+  assertEqual(body.paywallAddress, PAYWALL_ADDRESS, 'paywallAddress');
+  assertEqual(body.validMinutes, 60, 'validMinutes');
+  assert(!Number.isNaN(Date.parse(body.generatedAt)), `generatedAt: got ${body.generatedAt}`);
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+  note(`$${body.usdTarget} at $${body.priceUsd}/NIM = ${body.nimAmount} NIM = ${body.lunaAmount} luna`);
+});
+
+await test('GET /api/quote rounds up, so the pass is never underpaid', async () => {
+  // $29.99 at $0.00037 is 81,054.05… NIM — the fraction of a luna rounds towards us.
+  upstreamHandler = paywallUpstream({ priceUsd: 0.00037 });
+  const res = await call('/api/quote');
+  const body = await res.json();
+  const exact = (29.99 * 100000) / 0.00037;
+  assertEqual(body.lunaAmount, Math.ceil(exact), 'lunaAmount');
+  assert(body.lunaAmount >= exact, 'lunaAmount rounded down, leaving the pass underpaid');
+  assert(body.lunaAmount - exact < 1, `rounded up by more than a luna: ${body.lunaAmount - exact}`);
+});
+
+await test('GET /api/quote is cached (one CoinGecko call for two requests)', async () => {
+  upstreamHandler = paywallUpstream();
+  await call('/api/quote');
+  const repeat = await callCounting('/api/quote');
+  assertEqual(repeat.res.status, 200, 'status');
+  assertEqual(repeat.fetches, 0, 'upstream fetches on a cache hit');
+  assertEqual((await repeat.res.json()).lunaAmount, REQUIRED_LUNA, 'cached body');
+});
+
+await test('GET /api/quote with CoinGecko failing -> 502', async () => {
+  for (const opts of [{ priceFails: true }, { priceThrows: true }, { priceGarbage: true }]) {
+    reset();
+    upstreamHandler = paywallUpstream(opts);
+    const res = await call('/api/quote');
+    assertEqual(res.status, 502, `status for ${JSON.stringify(opts)}`);
+    assertEqual((await res.json()).error, 'upstream', `body.error for ${JSON.stringify(opts)}`);
+  }
+});
+
+// --- ChainMap paywall: /api/entitlement ------------------------------------
+
+await test('POST /api/entitlement with no payment -> no_payment', async () => {
+  upstreamHandler = paywallUpstream({ txs: [txFixture()] });
+  const res = await postEntitlement({ address: ADDRESS });
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'no_payment', 'reason');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.token, undefined, 'token (none without a payment)');
+  assertEqual(JSON.stringify(lastHistoryParams()), JSON.stringify([ADDRESS, 200, null]), 'RPC params');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
+});
+
+await test('POST /api/entitlement with a payment to another address -> no_payment', async () => {
+  // Right amount, wrong recipient: paying someone else is not paying us.
+  upstreamHandler = paywallUpstream({
+    txs: [paymentFixture(REQUIRED_LUNA, { to: VALIDATOR_B })],
+  });
+  const res = await postEntitlement({ address: ADDRESS });
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'no_payment', 'reason');
+});
+
+await test('POST /api/entitlement with an underpayment -> amount_too_low', async () => {
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(Math.floor(REQUIRED_LUNA * 0.5))] });
+  const res = await postEntitlement({ address: ADDRESS });
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'amount_too_low', 'reason');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+  assertEqual(body.paidUntil, undefined, 'paidUntil (nothing was bought)');
+});
+
+await test('POST /api/entitlement tolerance floor: 85% is enough, a luna less is not', async () => {
+  // NIM moves between the quote the user signs and this check, so a payment within 15%
+  // of today's price still counts.
+  assertEqual(TOLERANCE_FLOOR_LUNA, Math.floor(0.85 * REQUIRED_LUNA), 'tolerance floor arithmetic');
+
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(TOLERANCE_FLOOR_LUNA)] });
+  const atFloor = await (await postEntitlement({ address: ADDRESS })).json();
+  assertEqual(atFloor.entitled, true, 'entitled at exactly the floor');
+
+  reset();
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(TOLERANCE_FLOOR_LUNA - 1)] });
+  const belowFloor = await (await postEntitlement({ address: ADDRESS })).json();
+  assertEqual(belowFloor.entitled, false, 'entitled one luna below the floor');
+  assertEqual(belowFloor.reason, 'amount_too_low', 'reason');
+  note(`floor = ${TOLERANCE_FLOOR_LUNA} luna (85% of ${REQUIRED_LUNA})`);
+});
+
+await test('POST /api/entitlement with a payment above the floor -> entitled + a token', async () => {
+  const paid = Math.floor(REQUIRED_LUNA * 0.9);
+  upstreamHandler = paywallUpstream({ txs: [txFixture(), paymentFixture(paid)] });
+  const res = await postEntitlement({ address: ADDRESS });
+  assertEqual(res.status, 200, 'status');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
+
+  const body = await res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.address, ADDRESS, 'address (canonical blocks)');
+  // 30 days from the transaction's own timestamp, not from now.
+  assertEqual(body.paidUntil, RECENT_PAYMENT_MS + 30 * DAY_MS, 'paidUntil');
+  assert(body.expiresInMs > 27 * DAY_MS && body.expiresInMs <= 28 * DAY_MS, `expiresInMs: got ${body.expiresInMs}`);
+  assertEqual(body.daysLeft, 28, 'daysLeft');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  assertEqual(body.priceUsd, PRICE_USD, 'priceUsd');
+
+  // The token is exactly the HMAC this test computes for itself.
+  assertEqual(
+    body.token,
+    mintTestToken(ADDRESS.replace(/\s+/g, ''), body.paidUntil),
+    'token (base64url of "<address>.<paidUntil>.<hmac>")',
+  );
+
+  // And it round-trips: /api/me reads the same pass back out of it, with no upstream call.
+  const me = await callCounting('/api/me', { headers: { Authorization: `Bearer ${body.token}` } });
+  assertEqual(me.res.status, 200, '/api/me status');
+  assertEqual(me.fetches, 0, '/api/me upstream fetches');
+  const mine = await me.res.json();
+  assertEqual(mine.entitled, true, '/api/me entitled');
+  assertEqual(mine.address, ADDRESS, '/api/me address');
+  assertEqual(mine.paidUntil, body.paidUntil, '/api/me paidUntil');
+  assertEqual(mine.daysLeft, 28, '/api/me daysLeft');
+});
+
+await test('POST /api/entitlement takes the newest qualifying payment', async () => {
+  const older = paymentFixture(REQUIRED_LUNA, { hash: 'd'.repeat(64), timestamp: NOW - 20 * DAY_MS });
+  const newer = paymentFixture(REQUIRED_LUNA, { timestamp: RECENT_PAYMENT_MS });
+  // Oldest first, to prove the answer does not lean on the node's ordering.
+  upstreamHandler = paywallUpstream({ txs: [older, newer] });
+  const body = await (await postEntitlement({ address: ADDRESS })).json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.paidUntil, RECENT_PAYMENT_MS + 30 * DAY_MS, 'paidUntil (from the newest payment)');
+});
+
+await test('POST /api/entitlement counts 30 days from the payment -> expired', async () => {
+  upstreamHandler = paywallUpstream({
+    txs: [paymentFixture(REQUIRED_LUNA, { timestamp: STALE_PAYMENT_MS })],
+  });
+  const res = await postEntitlement({ address: ADDRESS });
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'expired', 'reason');
+  assertEqual(body.paidUntil, STALE_PAYMENT_MS + 30 * DAY_MS, 'paidUntil');
+  assert(body.paidUntil < Date.now(), 'paidUntil is not in the past');
+  assertEqual(body.requiredLuna, REQUIRED_LUNA, 'requiredLuna');
+  assertEqual(body.token, undefined, 'token (an expired pass mints none)');
+});
+
+await test('POST /api/entitlement matches the paywall address in any casing or spacing', async () => {
+  upstreamHandler = paywallUpstream({
+    txs: [paymentFixture(REQUIRED_LUNA, { to: PAYWALL_COMPACT.toLowerCase() })],
+  });
+  const body = await (await postEntitlement({
+    address: ADDRESS.replace(/\s+/g, '').toLowerCase(),
+  })).json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.address, ADDRESS, 'address (normalized in the answer)');
+  assertEqual(lastHistoryParams()[0], ADDRESS, 'RPC address param (normalized)');
+  assertEqual(body.token, mintTestToken(ADDRESS.replace(/\s+/g, ''), body.paidUntil), 'token');
+});
+
+await test('POST /api/entitlement from a disallowed origin -> 403, nothing fetched', async () => {
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(REQUIRED_LUNA)] });
+  const evil = await postEntitlement({ address: ADDRESS }, { Origin: 'https://evil.example' });
+  assertEqual(evil.status, 403, 'status for a disallowed origin');
+  assertEqual((await evil.json()).error, 'forbidden', 'body.error');
+  assertEqual(evil.headers.get('Access-Control-Allow-Origin'), null, 'ACAO');
+
+  const bare = await call('/api/entitlement', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: ADDRESS }),
+    omitOrigin: true,
+  });
+  assertEqual(bare.status, 403, 'status without an Origin header');
+  assertEqual((await bare.json()).error, 'forbidden', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('POST /api/entitlement with a bad address or body -> 400', async () => {
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(REQUIRED_LUNA)] });
+  for (const body of [{ address: 'NOTANADDRESS' }, { address: '' }, {}, { address: 123 }]) {
+    const res = await postEntitlement(body);
+    assertEqual(res.status, 400, `status for ${JSON.stringify(body)}`);
+    assertEqual((await res.json()).error, 'invalid address', `body.error for ${JSON.stringify(body)}`);
+  }
+  for (const raw of ['not json', '', '{"address":']) {
+    const res = await postEntitlement(raw);
+    assertEqual(res.status, 400, `status for ${JSON.stringify(raw)}`);
+    assertEqual((await res.json()).error, 'invalid body', `body.error for ${JSON.stringify(raw)}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('POST /api/entitlement with an upstream down -> 502', async () => {
+  // The price decides what counts as payment, so a missing price cannot be guessed at.
+  upstreamHandler = paywallUpstream({ priceFails: true, txs: [paymentFixture(REQUIRED_LUNA)] });
+  const noPrice = await postEntitlement({ address: ADDRESS });
+  assertEqual(noPrice.status, 502, 'status with CoinGecko down');
+  assertEqual((await noPrice.json()).error, 'upstream', 'body.error');
+
+  reset();
+  upstreamHandler = paywallUpstream({ historyThrows: true });
+  const noHistory = await postEntitlement({ address: ADDRESS });
+  assertEqual(noHistory.status, 502, 'status with the node down');
+  assertEqual((await noHistory.json()).error, 'upstream', 'body.error');
+
+  // A node that rejects the request is still a 502 here: unlike /api/history there is
+  // no cursor for the caller to fix, so it is our problem, not theirs.
+  reset();
+  upstreamHandler = paywallUpstream({ rejection: 'Internal error' });
+  const rejected = await postEntitlement({ address: ADDRESS });
+  assertEqual(rejected.status, 502, 'status with the node rejecting');
+  assertEqual((await rejected.json()).error, 'upstream', 'body.error');
+});
+
+await test('POST /api/entitlement is never cached (each call re-reads the chain)', async () => {
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(REQUIRED_LUNA)] });
+  await postEntitlement({ address: ADDRESS });
+  const again = await callCounting('/api/entitlement', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: ADDRESS }),
+  });
+  assertEqual(again.res.status, 200, 'status');
+  assertEqual(again.fetches, 2, 'upstream fetches on the second identical check (price + history)');
+  assertEqual((await again.res.json()).entitled, true, 'entitled');
+});
+
+await test('POST /api/entitlement without the token secret -> 500, nothing fetched', async () => {
+  upstreamHandler = paywallUpstream({ txs: [paymentFixture(REQUIRED_LUNA)] });
+  const res = await call('/api/entitlement', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: ADDRESS }),
+    env: { PAYWALL_ADDRESS },
+  });
+  assertEqual(res.status, 500, 'status');
+  assertEqual((await res.json()).error, 'server misconfigured', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+// --- ChainMap paywall: /api/me ---------------------------------------------
+
+await test('GET /api/me with a valid token -> entitled, no upstream call', async () => {
+  const paidUntil = NOW + 10 * DAY_MS;
+  const res = await callCounting('/api/me', {
+    headers: { Authorization: `Bearer ${mintTestToken(PAYWALL_COMPACT, paidUntil)}` },
+  });
+  assertEqual(res.res.status, 200, 'status');
+  assertEqual(res.fetches, 0, 'upstream fetches');
+  const body = await res.res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.address, PAYWALL_ADDRESS, 'address (re-spaced from the token)');
+  assertEqual(body.paidUntil, paidUntil, 'paidUntil');
+  assertEqual(body.daysLeft, 10, 'daysLeft');
+  assert(body.expiresInMs > 0 && body.expiresInMs <= 10 * DAY_MS, `expiresInMs: got ${body.expiresInMs}`);
+  assertEqual(res.res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
+  assertEqual(res.res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('GET /api/me with an expired paidUntil -> 200 {entitled:false}', async () => {
+  // The token is genuine; the pass behind it has simply run out. That is not a 401 —
+  // the client knows who it is, it just needs to renew.
+  const token = mintTestToken(PAYWALL_COMPACT, NOW - DAY_MS);
+  const res = await getMe(token);
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'expired', 'reason');
+  assertEqual(body.address, undefined, 'address (nothing to hand back)');
+});
+
+await test('GET /api/me with a tampered token -> 401', async () => {
+  const paidUntil = NOW + 10 * DAY_MS;
+  const decoded = Buffer.from(mintTestToken(PAYWALL_COMPACT, paidUntil), 'base64url').toString();
+  const [address, until, signature] = decoded.split('.');
+
+  const flipped = signature.slice(0, -1) + (signature.endsWith('0') ? '1' : '0');
+  const cases = {
+    'flipped signature bit': forgeToken([address, until, flipped]),
+    // The attack that matters: keep the signature, extend the pass by a year.
+    'extended paidUntil': forgeToken([address, String(Number(until) + 365 * DAY_MS), signature]),
+    'swapped address': forgeToken([ADDRESS.replace(/\s+/g, ''), until, signature]),
+    'another secret': mintTestToken(PAYWALL_COMPACT, paidUntil, 'not-the-secret'),
+  };
+  for (const [label, token] of Object.entries(cases)) {
+    const res = await getMe(token);
+    assertEqual(res.status, 401, `status for a ${label}`);
+    assertEqual((await res.json()).error, 'invalid token', `body.error for a ${label}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('GET /api/me with a malformed or missing token -> 401', async () => {
+  const paidUntil = NOW + 10 * DAY_MS;
+  const signature = 'f'.repeat(64);
+  const malformed = {
+    'no Authorization header': null,
+    'empty bearer': '',
+    'not base64url': '!!!not-base64!!!',
+    'not a token at all': Buffer.from('hello').toString('base64url'),
+    'two parts': forgeToken([PAYWALL_COMPACT, String(paidUntil)]),
+    'four parts': forgeToken([PAYWALL_COMPACT, String(paidUntil), signature, 'extra']),
+    'non-numeric paidUntil': forgeToken([PAYWALL_COMPACT, 'soon', signature]),
+    'not an address': forgeToken(['NOTANADDRESS', String(paidUntil), signature]),
+  };
+  for (const [label, token] of Object.entries(malformed)) {
+    const res = await getMe(token);
+    assertEqual(res.status, 401, `status for ${label}`);
+    assertEqual((await res.json()).error, 'invalid token', `body.error for ${label}`);
+  }
+
+  // A header that is not a bearer at all lands in the same place.
+  for (const header of ['Basic abc', 'Bearer', `${mintTestToken(PAYWALL_COMPACT, paidUntil)}`]) {
+    const res = await call('/api/me', { headers: { Authorization: header } });
+    assertEqual(res.status, 401, `status for Authorization: ${header.slice(0, 20)}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('GET /api/me without the token secret -> 500', async () => {
+  const res = await call('/api/me', {
+    headers: { Authorization: `Bearer ${mintTestToken(PAYWALL_COMPACT, NOW + DAY_MS)}` },
+    env: { PAYWALL_ADDRESS },
+  });
+  assertEqual(res.status, 500, 'status');
+  assertEqual((await res.json()).error, 'server misconfigured', 'body.error');
 });
 
 await test('bad address -> 400 {"error":"invalid address"}', async () => {

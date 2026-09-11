@@ -5,3 +5,12 @@ compatibility_date = "2026-09-01"
 routes = [
   { pattern = "nimiq-api.subimpact.net", custom_domain = true }
 ]
+
+[vars]
+# Where a ChainMap pass is paid. Public by design — it is printed in /api/quote.
+PAYWALL_ADDRESS = "NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC"
+
+# CHAINMAP_TOKEN_SECRET signs the pass tokens and is deliberately absent here — set it
+# once per environment with `npx wrangler secret put CHAINMAP_TOKEN_SECRET`. Without it
+# /api/entitlement and /api/me answer 500; rotating it invalidates every issued token,
+# which costs each holder one /api/entitlement round trip and nothing else.
