@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react"
 import { ForceSimulation } from "@/lib/forceSim"
-import type { MapGraphEdge, MapGraphNode, MapModel, ViewportTransform } from "./types"
+import { DASHED_KIND, EDGE_COLORS, edgeKind, type EdgeKind } from "./txKinds"
+import type { ColorMode, MapGraphEdge, MapGraphNode, MapModel, ViewportTransform } from "./types"
 
 export interface MapCanvasHandle {
   zoomIn: () => void
@@ -18,6 +19,8 @@ export interface MapCanvasView {
   hoveredNodeKey: string | null
   hoveredEdgeHash: string | null
   showLabels: boolean
+  /** `type` colours an arrow by what kind of transaction it is, `age` by how old. */
+  colorMode: ColorMode
 }
 
 export interface HoverTarget {
@@ -48,7 +51,7 @@ const MAX_SCALE = 6
 const DRAG_SLOP = 6
 const WARMUP_TICKS = 28
 
-/** Below this on-screen radius a node is a batched dot, not a shaded circle. */
+/** Below this on-screen radius a node is a flat batched hexagon, not a shaded one. */
 const DETAIL_RADIUS = 9
 /** Above this simulation alpha the map is moving too fast to read the detail. */
 const MOTION_ALPHA = 0.08
@@ -59,6 +62,8 @@ const MAX_ARROW_LENGTH = 15
 const EDGE_HIT_SLOP = 7
 /** Samples along a bowed edge for hit-testing. */
 const EDGE_SAMPLES = 12
+/** The dash a contract call is drawn with, in type mode. */
+const CONTRACT_DASH = [6, 4]
 
 /** A transaction older than this is drawn fully cooled. */
 const AGE_HORIZON_DAYS = 365
@@ -90,6 +95,39 @@ export function ageColorFromT(t: number, alpha = 1): string {
   return `rgba(${channel(0)}, ${channel(1)}, ${channel(2)}, ${alpha})`
 }
 
+const EDGE_STATES = ["lit", "near", "dim"] as const
+type EdgeState = (typeof EDGE_STATES)[number]
+const STATE_ALPHA: Record<EdgeState, number> = { lit: 0.66, near: 0.95, dim: 0.13 }
+
+/** `#rrggbb` at an alpha, so the type palette can reuse the age palette's states. */
+function withAlpha(hex: string, alpha: number): string {
+  const value = Number.parseInt(hex.slice(1), 16)
+  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`
+}
+
+/**
+ * An address is a hexagon, flat-topped, like the Nimiq logo and like the delegation
+ * map next door — vertices at 0°, 60° … 300°, so it points left and right and the
+ * edges across the top and bottom are level.
+ *
+ * The corners are a constant, not six `Math.cos` calls per node per frame: a settled
+ * 400-address map redraws all of them on every pointer move.
+ */
+const HEX_COS = Array.from({ length: 6 }, (_, i) => Math.cos((Math.PI / 3) * i))
+const HEX_SIN = Array.from({ length: 6 }, (_, i) => Math.sin((Math.PI / 3) * i))
+
+/**
+ * Hexagons are smaller than the circles they replace at the same radius — 2.598r²
+ * against πr² — so every radius grows by √(π/2.598) to keep a node the size it was.
+ */
+const HEX_RADIUS_SCALE = 1.0996
+
+/** One hexagon, appended to `path`. Six lines: no arcs, no sub-paths, no allocation. */
+function addHex(path: Path2D | CanvasRenderingContext2D, x: number, y: number, r: number): void {
+  path.moveTo(x + r * HEX_COS[0], y + r * HEX_SIN[0])
+  for (let i = 1; i < 6; i++) path.lineTo(x + r * HEX_COS[i], y + r * HEX_SIN[i])
+  path.closePath()
+}
 
 export function AddressMapCanvas({
   model,
@@ -143,17 +181,32 @@ export function AddressMapCanvas({
       add(edge.target.key, edge.source.key)
     }
 
-    // Age bucket per edge and the three palettes it can be drawn in, all fixed
-    // for the life of the map — a frame only looks colours up.
+    // Age bucket and transaction family per edge, and the palettes each can be drawn
+    // in — all fixed for the life of the map, so a frame only looks colours up. The
+    // family in particular is worth doing once: classifying 5,000 edges every frame
+    // would cost more than drawing them.
     const ageStep = new Map<string, number>()
+    const kindOf = new Map<string, EdgeKind>()
     for (const edge of edges) {
       ageStep.set(edge.hash, Math.round(ageT(edge.timestamp, now) * (AGE_STEPS - 1)))
+      kindOf.set(edge.hash, edgeKind(edge))
     }
-    const palette = {
-      lit: Array.from({ length: AGE_STEPS }, (_, i) => ageColorFromT(i / (AGE_STEPS - 1), 0.66)),
-      near: Array.from({ length: AGE_STEPS }, (_, i) => ageColorFromT(i / (AGE_STEPS - 1), 0.95)),
-      dim: Array.from({ length: AGE_STEPS }, (_, i) => ageColorFromT(i / (AGE_STEPS - 1), 0.13)),
-    }
+    const agePalette = Object.fromEntries(
+      EDGE_STATES.map((state) => [
+        state,
+        Array.from({ length: AGE_STEPS }, (_, i) =>
+          ageColorFromT(i / (AGE_STEPS - 1), STATE_ALPHA[state]),
+        ),
+      ]),
+    ) as Record<EdgeState, string[]>
+    const typePalette = Object.fromEntries(
+      EDGE_STATES.map((state) => [
+        state,
+        Object.fromEntries(
+          Object.entries(EDGE_COLORS).map(([kind, hex]) => [kind, withAlpha(hex, STATE_ALPHA[state])]),
+        ) as Record<EdgeKind, string>,
+      ]),
+    ) as Record<EdgeState, Record<EdgeKind, string>>
 
     const aspect = Math.min(1.6, Math.max(0.9, container.clientWidth / Math.max(1, container.clientHeight)))
     const simulation = new ForceSimulation(nodes, links, {
@@ -206,8 +259,14 @@ export function AddressMapCanvas({
       }
     }
 
+    /**
+     * A node's on-screen size: the circumradius of its hexagon.
+     *
+     * The ×1.1 is the area correction, applied here rather than at each draw site so
+     * that hit-testing, the arrowhead gap and the rings all agree with what is painted.
+     */
     function screenRadius(node: MapGraphNode): number {
-      return Math.max(node.isSeed ? 7 : 3, node.radius * transform.scale)
+      return Math.max(node.isSeed ? 7 : 3, node.radius * transform.scale) * HEX_RADIUS_SCALE
     }
 
     function nodeAt(screenX: number, screenY: number): MapGraphNode | null {
@@ -533,11 +592,17 @@ export function AddressMapCanvas({
       ctx.fillRect(0, 0, width, height)
       drawGrid(width, height)
 
-      // 1. Flows, batched into one stroke and one fill per (age, width, state)
+      // 1. Flows, batched into one stroke and one fill per (colour, width, state)
       //    bucket. A 5,000-edge map draws in a few dozen canvas calls instead of
-      //    ten thousand, which is the difference between 15fps and 60.
+      //    ten thousand, which is the difference between 15fps and 60. Colouring by
+      //    family rather than age does not change that: there are six families and
+      //    twelve age steps, so the bucket count goes *down* in type mode.
+      const byType = current.colorMode === "type"
       const strokeScale = Math.min(1.8, Math.max(0.75, Math.sqrt(scale)))
-      const batches = new Map<string, { color: string; width: number; curves: Path2D; heads: Path2D }>()
+      const batches = new Map<
+        string,
+        { color: string; width: number; dashed: boolean; curves: Path2D; heads: Path2D }
+      >()
       const highlighted: MapGraphEdge[] = []
 
       for (const edge of edges) {
@@ -555,17 +620,20 @@ export function AddressMapCanvas({
         }
 
         const touchesFocus = focus != null && (edge.source === focus || edge.target === focus)
-        const state = focus == null ? "lit" : touchesFocus ? "near" : "dim"
+        const state: EdgeState = focus == null ? "lit" : touchesFocus ? "near" : "dim"
+        const kind = kindOf.get(edge.hash) ?? "basic"
         const step = ageStep.get(edge.hash) ?? AGE_STEPS - 1
         // Half-pixel width buckets: finer than the difference is visible.
         const widthStep = Math.round(edge.width * 2)
-        const key = `${state}|${step}|${widthStep}`
+        const dashed = byType && kind === DASHED_KIND
+        const key = `${state}|${byType ? kind : step}|${widthStep}`
 
         let batch = batches.get(key)
         if (!batch) {
           batch = {
-            color: palette[state][step],
+            color: byType ? typePalette[state][kind] : agePalette[state][step],
             width: (widthStep / 2) * strokeScale,
+            dashed,
             curves: new Path2D(),
             heads: new Path2D(),
           }
@@ -583,7 +651,11 @@ export function AddressMapCanvas({
       for (const batch of batches.values()) {
         ctx.strokeStyle = batch.color
         ctx.lineWidth = batch.width
+        // A contract call is dashed as well as violet, so it still reads as one on a
+        // monochrome screen — and so the arrowhead, which is filled, stays solid.
+        if (batch.dashed) ctx.setLineDash(CONTRACT_DASH)
         ctx.stroke(batch.curves)
+        if (batch.dashed) ctx.setLineDash([])
         ctx.fillStyle = batch.color
         ctx.fill(batch.heads)
       }
@@ -606,9 +678,10 @@ export function AddressMapCanvas({
         ctx.fill(head)
       }
 
-      // 2. Addresses. Anything below DETAIL_RADIUS on screen is a dot, so it is
-      //    batched by colour rather than shaded and stroked individually.
-      const dots = new Map<string, Path2D>()
+      // 2. Addresses. Anything below DETAIL_RADIUS on screen is a flat hexagon, so it
+      //    joins a path batched by colour rather than being shaded and stroked on its
+      //    own — six lineTo calls into a shared Path2D, no per-node allocation.
+      const flat = new Map<string, Path2D>()
       const detailed: MapGraphNode[] = []
       for (const node of nodes) {
         const sx = node.x * scale + tx
@@ -622,13 +695,12 @@ export function AddressMapCanvas({
         }
         const dimmed = focus != null && !isNeighbour(node, focus)
         const key = `${node.color}|${dimmed ? "dim" : "lit"}|${node.expanded ? "full" : "edge"}`
-        let path = dots.get(key)
-        if (!path) dots.set(key, (path = new Path2D()))
-        path.moveTo(sx + r, sy)
-        path.arc(sx, sy, r, 0, Math.PI * 2)
+        let path = flat.get(key)
+        if (!path) flat.set(key, (path = new Path2D()))
+        addHex(path, sx, sy, r)
       }
 
-      for (const [key, path] of dots) {
+      for (const [key, path] of flat) {
         const [color, state, opened] = key.split("|")
         ctx.globalAlpha = state === "dim" ? 0.22 : opened === "edge" ? 0.62 : 0.95
         ctx.fillStyle = color
@@ -655,7 +727,7 @@ export function AddressMapCanvas({
         gradient.addColorStop(0.65, `${node.color}cc`)
         gradient.addColorStop(1, "#0b0f16")
         ctx.beginPath()
-        ctx.arc(sx, sy, r, 0, Math.PI * 2)
+        addHex(ctx, sx, sy, r)
         ctx.fillStyle = gradient
         ctx.fill()
         ctx.shadowBlur = 0
@@ -670,7 +742,7 @@ export function AddressMapCanvas({
 
         if (node.isSeed) {
           ctx.beginPath()
-          ctx.arc(sx, sy, r + 5, 0, Math.PI * 2)
+          addHex(ctx, sx, sy, r + 5)
           ctx.strokeStyle = `${node.color}99`
           ctx.lineWidth = 1.5
           ctx.stroke()
@@ -678,7 +750,7 @@ export function AddressMapCanvas({
         if (isSelected) {
           const offset = Math.sin(pulse * 3) * 2.5
           ctx.beginPath()
-          ctx.arc(sx, sy, r + 8 + offset, 0, Math.PI * 2)
+          addHex(ctx, sx, sy, r + 8 + offset)
           ctx.strokeStyle = "#ffffff"
           ctx.lineWidth = 1.4
           ctx.setLineDash([5, 5])
@@ -734,7 +806,7 @@ export function AddressMapCanvas({
 
     const loop = () => {
       const current = viewRef.current
-      const signature = `${current.selectedNodeKey}|${current.selectedEdgeHash}|${current.hoveredNodeKey}|${current.hoveredEdgeHash}|${current.showLabels}`
+      const signature = `${current.selectedNodeKey}|${current.selectedEdgeHash}|${current.hoveredNodeKey}|${current.hoveredEdgeHash}|${current.showLabels}|${current.colorMode}`
       if (signature !== lastSignature) {
         lastSignature = signature
         dirty = true
@@ -824,12 +896,16 @@ export function AddressMapCanvas({
   }, [model])
 
   return (
-    <div ref={containerRef} className="absolute inset-0 overflow-hidden">
+    <div
+      ref={containerRef}
+      data-nimmap-colormode={view.colorMode}
+      className="absolute inset-0 overflow-hidden"
+    >
       <canvas
         ref={canvasRef}
-        data-chainmap-canvas=""
+        data-nimmap-canvas=""
         role="img"
-        aria-label={`Money-flow map of ${model.nodes.length} Nimiq addresses and ${model.edges.length} transactions, seeded from ${model.meta.seed}. The transaction list below the map carries the same data as text.`}
+        aria-label={`Money-flow map of ${model.nodes.length} Nimiq addresses and ${model.edges.length} transactions, seeded from ${model.meta.seed}. Addresses are hexagons; each arrow is one transaction, coloured by ${view.colorMode === "type" ? "what kind of transaction it is" : "how old it is"}. The transaction list below the map carries the same data as text.`}
         className="block h-full w-full select-none"
         style={{ cursor: "grab", touchAction: "pan-y" }}
       />

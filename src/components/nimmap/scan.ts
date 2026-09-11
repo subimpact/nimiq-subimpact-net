@@ -18,7 +18,7 @@
  */
 
 import { compactAddress, formatAddress } from "@/lib/nimiq"
-import { API_BASE } from "@/lib/chainmapAuth"
+import { API_BASE } from "@/lib/nimmapAuth"
 import type {
   HistoryPage,
   MapEdge,
@@ -85,6 +85,11 @@ export async function fetchHistoryPage(
     clearTimeout(timer)
     signal?.removeEventListener("abort", abort)
   }
+}
+
+/** A classification field, or nothing at all. `null` from the worker means "no data". */
+function numberOrUndefined(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined
 }
 
 function blankNode(key: string, level: number, isSeed: boolean): MapNode {
@@ -178,7 +183,7 @@ export async function scanAddress(seedAddress: string, options: ScanOptions): Pr
           if (attempt === RETRY_DELAYS_MS.length) {
             // An address that will not load after three tries is a hole in the
             // map, not the end of it: mark it and keep going.
-            console.debug("chainmap: history failed", key, error)
+            console.debug("nimmap: history failed", key, error)
             node.partial = true
             failedCount++
             scannedCount++
@@ -229,6 +234,14 @@ export async function scanAddress(seedAddress: string, options: ScanOptions): Pr
             timestamp: Number(tx.timestamp) || 0,
             blockNumber: Number(tx.blockNumber) || 0,
             confirmations: Number(tx.confirmations) || 0,
+            // How the edge will be coloured. A worker that predates these fields —
+            // or a node that said nothing — leaves them undefined, and the edge is
+            // drawn as an ordinary transfer.
+            fromType: numberOrUndefined(tx.fromType),
+            toType: numberOrUndefined(tx.toType),
+            flags: numberOrUndefined(tx.flags),
+            dataType: numberOrUndefined(tx.dataType),
+            senderDataType: numberOrUndefined(tx.senderDataType),
           })
           const sender = nodes.get(from)
           const recipient = nodes.get(to)

@@ -163,7 +163,7 @@ function postBroadcast(body) {
   });
 }
 
-// --- ChainMap paywall fixtures ---------------------------------------------
+// --- NimMap paywall fixtures -----------------------------------------------
 
 // The price feeds, in the order the worker tries them. CoinGecko is primary; the two
 // exchanges exist because Cloudflare's egress is rate-limited out of CoinGecko.
@@ -381,7 +381,7 @@ function forgeToken(payloadFields, signature) {
   ).toString('base64url');
 }
 
-// --- ChainMap sign-in fixtures ---------------------------------------------
+// --- NimMap sign-in fixtures -----------------------------------------------
 
 const SIGNED_MESSAGE_PREFIX = '\x16Nimiq Signed Message:\n';
 const NONCE_TTL_MS = 10 * 60 * 1000;
@@ -389,7 +389,7 @@ const HOUR_MS = 60 * 60 * 1000;
 
 /** The sign-in sentence, spelled out here so the worker's copy has something to match. */
 function signInMessage(nonce) {
-  return `nimiq.subimpact.net ChainMap sign-in\nnonce: ${nonce}`;
+  return `nimiq.subimpact.net NimMap sign-in\nnonce: ${nonce}`;
 }
 
 /**
@@ -704,7 +704,7 @@ await test('OPTIONS preflight -> 204 + CORS headers', async () => {
   assertEqual(res.status, 204, 'status');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
   assertEqual(res.headers.get('Access-Control-Allow-Methods'), 'GET, POST, OPTIONS', 'ACAM');
-  // Authorization is allowed so the browser may send the ChainMap pass on /api/me.
+  // Authorization is allowed so the browser may send the NimMap pass on /api/me.
   assertEqual(res.headers.get('Access-Control-Allow-Headers'), 'Content-Type, Authorization', 'ACAH');
   assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
 });
@@ -1417,7 +1417,7 @@ await test('GET /api/status from a disallowed origin -> no CORS headers', async 
   assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
 });
 
-// --- ChainMap paywall: /api/history ----------------------------------------
+// --- NimMap paywall: /api/history ------------------------------------------
 
 await test('GET /api/history/:address -> normalized page, nextStartAt on a full page', async () => {
   upstreamHandler = paywallUpstream({
@@ -1452,10 +1452,17 @@ await test('GET /api/history/:address -> normalized page, nextStartAt on a full 
   assertEqual(first.to, STAKER_A1, 'data[0].to');
   assertEqual(first.value, 100000, 'data[0].value');
   assertEqual(first.fee, 138, 'data[0].fee');
-  // The node's payload noise never reaches the client, nor the cache entry.
+  // The classification fields the map colours edges by come through as ints…
+  assertEqual(first.fromType, 0, 'data[0].fromType');
+  assertEqual(first.toType, 0, 'data[0].toType');
+  assertEqual(first.flags, 0, 'data[0].flags');
+  // …but the blobs they were read out of do not: this fixture's recipientData is 600
+  // characters of which only the first byte is ever drawn.
+  assertEqual(first.dataType, 0xde, 'data[0].dataType (first byte of recipientData)');
+  assertEqual(first.senderDataType, null, 'data[0].senderDataType (empty senderData)');
   assertEqual(first.recipientData, undefined, 'data[0].recipientData (dropped)');
+  assertEqual(first.senderData, undefined, 'data[0].senderData (dropped)');
   assertEqual(first.relatedAddresses, undefined, 'data[0].relatedAddresses (dropped)');
-  assertEqual(first.fromType, undefined, 'data[0].fromType (dropped)');
 
   // A page as long as `max` means there is probably more behind it.
   assertEqual(body.pagination.nextStartAt, HISTORY_HASH_2, 'pagination.nextStartAt');
@@ -1507,6 +1514,58 @@ await test('GET /api/history/:address drops rows that are not transactions', asy
   const body = await res.json();
   assertEqual(body.data.length, 1, 'data length (only the complete transaction)');
   assertEqual(body.data[0].hash, HISTORY_HASH_1, 'data[0].hash');
+});
+
+await test('GET /api/history lifts the op code out of each data blob', async () => {
+  // The op codes the map classifies by, verified against @nimiq/core 2.21.0: a staking
+  // recipientData of 0x05 is create-staker ("stake"), 0x09 is retire-stake ("unstake"),
+  // and a senderData of 0x01 is remove-stake — the payout leaving the staking contract.
+  upstreamHandler = paywallUpstream({
+    txs: [
+      txFixture({ recipientData: '05' + '00'.repeat(99), senderData: '' }),
+      txFixture({ hash: HISTORY_HASH_2, recipientData: '0900000000000003e8', senderData: '01' }),
+    ],
+  });
+  const rows = (await (await call(`/api/history/${ADDRESS_ENCODED}?max=2`)).json()).data;
+  assertEqual(rows[0].dataType, 5, "data[0].dataType ('05…' -> 5)");
+  assertEqual(rows[0].senderDataType, null, 'data[0].senderDataType (empty -> null)');
+  assertEqual(rows[1].dataType, 9, "data[1].dataType ('09…' -> 9)");
+  assertEqual(rows[1].senderDataType, 1, "data[1].senderDataType ('01' -> 1)");
+});
+
+await test('GET /api/history tolerates missing and malformed classification fields', async () => {
+  upstreamHandler = paywallUpstream({
+    txs: [
+      // The node omits them entirely — an old node, or a row it had nothing to say about.
+      { hash: HISTORY_HASH_1, from: ADDRESS, to: STAKER_A1, value: 100000 },
+      // Strings, which is how the RPC actually sends them.
+      txFixture({ hash: HISTORY_HASH_2, fromType: '3', toType: '0', flags: '2', recipientData: '' }),
+      // Blobs that are not a whole hex byte.
+      txFixture({ hash: CURSOR_HASH, recipientData: 'z', senderData: '0' }),
+      // A non-string blob, and types the node could never have meant.
+      txFixture({ hash: 'd'.repeat(64), recipientData: 42, fromType: 'basic', flags: null }),
+    ],
+  });
+  const rows = (await (await call(`/api/history/${ADDRESS_ENCODED}?max=4`)).json()).data;
+  assertEqual(rows.length, 4, 'data length (every row is still a transaction)');
+
+  assertEqual(rows[0].fromType, 0, 'missing fromType defaults to 0');
+  assertEqual(rows[0].toType, 0, 'missing toType defaults to 0');
+  assertEqual(rows[0].flags, 0, 'missing flags defaults to 0');
+  assertEqual(rows[0].dataType, null, 'missing recipientData -> null');
+  assertEqual(rows[0].senderDataType, null, 'missing senderData -> null');
+
+  assertEqual(rows[1].fromType, 3, "fromType '3' -> 3");
+  assertEqual(rows[1].toType, 0, "toType '0' -> 0");
+  assertEqual(rows[1].flags, 2, "flags '2' -> 2 (signalling)");
+  assertEqual(rows[1].dataType, null, 'empty recipientData -> null');
+
+  assertEqual(rows[2].dataType, null, "a non-hex blob ('z') -> null");
+  assertEqual(rows[2].senderDataType, null, "half a byte ('0') -> null");
+
+  assertEqual(rows[3].dataType, null, 'a non-string recipientData -> null');
+  assertEqual(rows[3].fromType, 0, "an unparseable fromType ('basic') -> 0");
+  assertEqual(rows[3].flags, 0, 'a null flags -> 0');
 });
 
 await test('GET /api/history with a bad address -> 400, no upstream call', async () => {
@@ -1600,7 +1659,7 @@ await test('GET /api/history is cached per address + max + startAt', async () =>
   assertEqual(again.fetches, 1, 'upstream fetches after a rejection');
 });
 
-// --- ChainMap paywall: /api/quote ------------------------------------------
+// --- NimMap paywall: /api/quote --------------------------------------------
 
 await test('GET /api/quote -> $29.99 priced in luna at the CoinGecko rate', async () => {
   upstreamHandler = paywallUpstream();
@@ -1658,7 +1717,7 @@ await test('GET /api/quote with every price source failing -> 502', async () => 
   }
 });
 
-// --- ChainMap paywall: the price fallback chain ----------------------------
+// --- NimMap paywall: the price fallback chain ------------------------------
 //
 // CoinGecko rate-limits Cloudflare's egress hard enough that /api/quote, and with it
 // /api/auth/verify and /api/entitlement, 502 for everyone. These cases are the fallback:
@@ -1753,7 +1812,7 @@ await test('/api/auth/verify prices a sign-in off the fallback when CoinGecko is
   assertEqual(priceCalls().join(), 'coingecko,gate', 'sources tried');
 });
 
-// --- ChainMap sign-in: vendored BLAKE2b ------------------------------------
+// --- NimMap sign-in: vendored BLAKE2b --------------------------------------
 
 await test('blake2b matches Node crypto at 512 bits, across block boundaries', async () => {
   // BLAKE2b compresses 128 bytes at a time and the final block is the one that carries
@@ -1784,7 +1843,7 @@ await test('blake2b-256 matches the RFC 7693 reference digests', async () => {
   }
 });
 
-// --- ChainMap sign-in: address derivation ----------------------------------
+// --- NimMap sign-in: address derivation ------------------------------------
 
 await test('deriveAddress(publicKey) equals @nimiq/core for 16 random keypairs', async () => {
   // The fact the whole sign-in rests on: the worker must land on the same address a real
@@ -1823,7 +1882,7 @@ await test('deriveAddress produces addresses the worker itself accepts', async (
   }
 });
 
-// --- ChainMap sign-in: /api/auth/nonce -------------------------------------
+// --- NimMap sign-in: /api/auth/nonce ---------------------------------------
 
 await test('GET /api/auth/nonce -> a signed nonce and the message to sign', async () => {
   const res = await callCounting('/api/auth/nonce');
@@ -1860,7 +1919,7 @@ await test('GET /api/auth/nonce without the token secret -> 500', async () => {
   assertEqual((await res.json()).error, 'server misconfigured', 'body.error');
 });
 
-// --- ChainMap sign-in: /api/auth/verify ------------------------------------
+// --- NimMap sign-in: /api/auth/verify --------------------------------------
 
 await test('POST /api/auth/verify with a real signature and no payment -> authToken', async () => {
   const wallet = makeWallet();
@@ -1993,7 +2052,7 @@ await test('POST /api/auth/verify with a signature over another message -> 401',
   upstreamHandler = paywallUpstream({ txs: [] });
   const elsewhere = await signIn(wallet, {
     nonce: fresh,
-    signature: wallet.sign(`evil.example ChainMap sign-in\nnonce: ${fresh}`),
+    signature: wallet.sign(`evil.example NimMap sign-in\nnonce: ${fresh}`),
   });
   assertEqual(elsewhere.status, 401, 'status for another site\'s message');
   assertEqual((await elsewhere.json()).error, 'invalid signature', 'body.error');
@@ -2192,7 +2251,7 @@ await test('GET /api/auth/verify -> 404 (the route is POST only)', async () => {
   assertEqual((await res.json()).error, 'not found', 'body.error');
 });
 
-// --- ChainMap paywall: payment search --------------------------------------
+// --- NimMap paywall: payment search ----------------------------------------
 
 await test('payment search: no payment in the history -> no_payment', async () => {
   upstreamHandler = paywallUpstream({ txs: [txFixture()] });
@@ -2339,7 +2398,7 @@ await test('payment search: an underpayment on page 1 survives into the page-2 a
   assertEqual(historyCalls().length, 2, 'history pages fetched');
 });
 
-// --- ChainMap paywall: /api/entitlement ------------------------------------
+// --- NimMap paywall: /api/entitlement --------------------------------------
 
 await test('POST /api/entitlement with an auth token -> re-checks the chain, mints a pass', async () => {
   const wallet = makeWallet();
@@ -2480,7 +2539,7 @@ await test('POST /api/entitlement without the token secret -> 500, nothing fetch
   assertEqual(upstreamCalls.length, 0, 'upstream call count');
 });
 
-// --- ChainMap paywall: /api/me ---------------------------------------------
+// --- NimMap paywall: /api/me -----------------------------------------------
 
 await test('GET /api/me with a valid pass token -> entitled, no upstream call', async () => {
   const paidUntil = NOW + 10 * DAY_MS;
@@ -2582,7 +2641,7 @@ await test('GET /api/me without the token secret -> 500', async () => {
   assertEqual((await res.json()).error, 'server misconfigured', 'body.error');
 });
 
-// --- ChainMap comp access --------------------------------------------------
+// --- NimMap comp access ----------------------------------------------------
 //
 // A comped wallet holds a pass it never paid for, named in the COMP_ADDRESSES var. The
 // two things worth proving are that it is answered *before* any upstream — so the comp

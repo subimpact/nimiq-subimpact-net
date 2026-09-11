@@ -19,8 +19,26 @@ export const TIER_LIMITS: Record<Tier, TierLimits> = {
   paid: { maxDepth: 6, maxTxPerAddress: 50, addressCap: 400, concurrency: 8, exports: true },
 }
 
+/**
+ * What the worker tells us about a transaction's shape, beyond who paid whom.
+ *
+ * `fromType`/`toType` are the @nimiq/core `AccountType` of the two ends — 0 basic,
+ * 1 vesting, 2 HTLC, 3 the staking contract. `flags` bit 1 marks a signalling
+ * transaction. `dataType`/`senderDataType` are the first byte of the recipient's and
+ * the sender's data blob, which for the staking contract is the operation itself; see
+ * `txKinds.ts` for the table. Every one of them is optional: an older worker, or a node
+ * that said nothing, leaves the edge classified as an ordinary transfer.
+ */
+export interface TxClassification {
+  fromType?: number
+  toType?: number
+  flags?: number
+  dataType?: number | null
+  senderDataType?: number | null
+}
+
 /** One row of `GET /api/history/:address`. Values are luna, timestamps are ms. */
-export interface HistoryTx {
+export interface HistoryTx extends TxClassification {
   hash: string
   blockNumber: number
   timestamp: number
@@ -58,7 +76,7 @@ export interface MapNode {
   contract: boolean
 }
 
-export interface MapEdge {
+export interface MapEdge extends TxClassification {
   hash: string
   /** Compacted addresses, matching MapNode.key. */
   from: string
@@ -123,7 +141,7 @@ export interface MapGraphNode extends SimNode {
   color: string
 }
 
-export interface MapGraphEdge {
+export interface MapGraphEdge extends TxClassification {
   hash: string
   source: MapGraphNode
   target: MapGraphNode
@@ -137,6 +155,9 @@ export interface MapGraphEdge {
   /** Sideways offset so parallel transfers between one pair stay legible. */
   bow: number
 }
+
+/** How the canvas decides an edge's colour. */
+export type ColorMode = "type" | "age"
 
 export interface MapModel {
   nodes: MapGraphNode[]

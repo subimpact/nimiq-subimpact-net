@@ -1,44 +1,50 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { ChainMap } from '../components/chainmap/ChainMap';
+import { NimMap } from '../components/nimmap/NimMap';
 
-const title = 'ChainMap — follow the money on Nimiq';
+const title = 'NimMap — follow the money on Nimiq';
 const description =
   'Trace any Nimiq address through its transaction history and see the money move: a live, directed map of who paid whom, built from on-chain data. Free to three hops.';
 ---
 
 <Layout title={title} description={description}>
   <section class="mx-auto w-full max-w-[1920px] px-4 pt-12 pb-24 md:px-8 md:pb-16 xl:px-10">
-    <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">ChainMap</p>
+    <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">NimMap</p>
     <h1 class="text-3xl font-bold tracking-tight md:text-4xl">Follow the money on Nimiq</h1>
     <p class="mt-3 max-w-[64ch] text-sm leading-relaxed text-muted-foreground">
-      Put in any Nimiq address and ChainMap walks its transaction history outward, hop by
-      hop: every node is an address, every arrow is a transaction, pointing the way the
-      money went. Arrow width is the amount, colour is age. Nothing is sampled — the map is
-      composed on request from live chain data, and it is free to three hops.
+      Put in any Nimiq address and NimMap walks its transaction history outward, hop by
+      hop: every hexagon is an address, every arrow is a transaction, pointing the way the
+      money went. Arrow width is the amount, and colour is what kind of transaction it was
+      — a stake, a reward, a contract call, a plain transfer. Nothing is sampled — the map
+      is composed on request from live chain data, and it is free to three hops.
     </p>
 
     <div class="mt-8">
-      <ChainMap client:load />
+      <NimMap client:load />
     </div>
 
     <div class="mt-10 grid gap-8 border-t border-border pt-8 md:grid-cols-3">
       <div>
         <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Reading it</p>
         <p class="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted-foreground">
-          The seed sits pinned at the centre in cyan; everything around it was reached by
-          following a transaction. Node size is the money that passed through an address,
-          on a log scale, so a wallet and a whale both stay on screen. A dashed outline is
-          the edge of the scan — an address that was found but never opened.
+          Addresses are hexagons, on the Nimiq grid: the seed pinned at the centre in
+          cyan, everything around it reached by following a transaction. Hex size is the
+          money that passed through an address, on a log scale, so a wallet and a whale
+          both stay on screen. A dashed outline is the edge of the scan — an address that
+          was found but never opened. Arrows are coloured by transaction family: cyan for
+          staking, gold for a payout from the staking contract, violet and dashed for a
+          contract call, pink for an HTLC, teal for vesting, zinc for a plain transfer.
+          The legend's Type / Age chips switch that for the cyan-to-grey age ramp.
         </p>
       </div>
       <div>
         <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Controls</p>
         <p class="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted-foreground">
-          Drag to pan, scroll or pinch to zoom, drag a node to pull it out of the pile.
-          Click a node or an arrow for its details, double-click a node to re-scan from
+          Drag to pan, scroll or pinch to zoom, drag a hex to pull it out of the pile.
+          Click a hex or an arrow for its details, double-click a hex to re-scan from
           there, Esc to deselect. Depth 1 is the seed and whoever it traded with; each step
-          adds another hop.
+          adds another hop, and the depth you pick applies to the next scan — 4 to 6 needs
+          a pass. The legend sits bottom right and folds away; on a phone it starts folded.
         </p>
       </div>
       <div>

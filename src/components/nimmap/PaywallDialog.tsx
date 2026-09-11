@@ -1,5 +1,5 @@
 /**
- * The ChainMap pass: sign in with a wallet, pay on chain, come back entitled.
+ * The NimMap pass: sign in with a wallet, pay on chain, come back entitled.
  *
  * Three steps, and the order is forced by browser popup blockers rather than by
  * taste — `chooseAddress` and `signMessage` each have to be reached from inside
@@ -36,11 +36,11 @@ import {
   verifySignature,
   type EntitlementResponse,
   type Pass,
-} from "@/lib/chainmapAuth"
+} from "@/lib/nimmapAuth"
 import { loadQuote } from "./roles"
 
 const HUB_URL = "https://hub.nimiq.com"
-const APP_NAME = "ImpactZero ChainMap"
+const APP_NAME = "ImpactZero NimMap"
 
 /** How many times "I've paid" re-asks the chain before giving up for now. */
 const MAX_POLLS = 6
@@ -169,13 +169,13 @@ export function PaywallDialog({
         onEntitled(granted)
         setStep("done")
         // A comped pass would otherwise report 36,500 days and skew every average.
-        track("chainmap_unlock_success", granted.comp ? { comp: true } : { daysLeft: granted.daysLeft })
+        track("nimmap_unlock_success", granted.comp ? { comp: true } : { daysLeft: granted.daysLeft })
         return true
       }
 
       setReason(payload.reason)
       setStep("checkout")
-      track("chainmap_checkout_viewed", {
+      track("nimmap_checkout_viewed", {
         requiredLuna: payload.requiredLuna ?? 0,
         priceUsd: payload.priceUsd ?? 0,
       })
@@ -188,7 +188,7 @@ export function PaywallDialog({
     setError(null)
     setNotice(null)
     setBusy(true)
-    track("chainmap_signin_started")
+    track("nimmap_signin_started")
     // No await before chooseAddress: the popup needs this click.
     getHub()
       .chooseAddress({ appName: APP_NAME })
@@ -263,7 +263,7 @@ export function PaywallDialog({
       }
       if (cancelled.current) return
 
-      track("chainmap_payment_check", { found: Boolean(payload.entitled) })
+      track("nimmap_payment_check", { found: Boolean(payload.entitled) })
       if (applyEntitlement(payload, address)) {
         setPolling(false)
         return
@@ -287,10 +287,10 @@ export function PaywallDialog({
     // payment is already on the chain, and the auth token is good for an hour.
     // Trapping someone here for a whole minute would be the worse bargain.
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent data-chainmap-paywall="">
+      <DialogContent data-nimmap-paywall="">
         <DialogHeader>
           <DialogTitle>
-            {step === "manage" ? "Your ChainMap pass" : step === "done" ? "Pass active" : "ChainMap Pass"}
+            {step === "manage" ? "Your NimMap pass" : step === "done" ? "Pass active" : "NimMap Pass"}
           </DialogTitle>
           <DialogDescription>
             {step === "manage" || step === "done"
@@ -319,7 +319,7 @@ export function PaywallDialog({
                 {notice}
               </p>
             )}
-            <Button size="lg" onClick={connect} disabled={busy} data-chainmap-connect="">
+            <Button size="lg" onClick={connect} disabled={busy} data-nimmap-connect="">
               {busy ? (
                 <>
                   <Loader2Icon className="animate-spin" /> Waiting for the Hub…
@@ -344,7 +344,7 @@ export function PaywallDialog({
                 {notice}
               </p>
             )}
-            <Button size="lg" onClick={sign} disabled={busy} data-chainmap-sign="">
+            <Button size="lg" onClick={sign} disabled={busy} data-nimmap-sign="">
               {busy ? (
                 <>
                   <Loader2Icon className="animate-spin" /> Waiting for your signature…
@@ -367,7 +367,7 @@ export function PaywallDialog({
               <p className="text-[0.7rem] text-muted-foreground">Send exactly</p>
               <p
                 className="mt-0.5 font-mono text-2xl font-semibold tabular-nums text-foreground"
-                data-chainmap-amount=""
+                data-nimmap-amount=""
               >
                 {quote ? `${requiredNim(quote.requiredLuna)} NIM` : "…"}
               </p>
@@ -406,7 +406,7 @@ export function PaywallDialog({
               <p
                 className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground"
                 role="status"
-                data-chainmap-not-found=""
+                data-nimmap-not-found=""
               >
                 Not found yet — try again in a minute. Your sign-in stays valid for an hour, so
                 you can close this and come back.
@@ -414,7 +414,7 @@ export function PaywallDialog({
             )}
             {error && <ErrorBox message={error} />}
 
-            <Button size="lg" onClick={checkPayment} disabled={polling} data-chainmap-check="">
+            <Button size="lg" onClick={checkPayment} disabled={polling} data-nimmap-check="">
               {polling ? (
                 <>
                   <Loader2Icon className="animate-spin" /> Checking the chain…
@@ -461,7 +461,7 @@ export function PaywallDialog({
               <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <div>
                   <dt className="text-muted-foreground">{pass.comp ? "Pass" : "Days left"}</dt>
-                  <dd className="font-mono tabular-nums text-foreground" data-chainmap-days-left="">
+                  <dd className="font-mono tabular-nums text-foreground" data-nimmap-days-left="">
                     {pass.comp ? "Owner" : pass.daysLeft}
                   </dd>
                 </div>
@@ -486,7 +486,7 @@ export function PaywallDialog({
                   setError(null)
                   onRefresh()
                 }}
-                data-chainmap-refresh=""
+                data-nimmap-refresh=""
               >
                 Refresh status
               </Button>
@@ -574,7 +574,7 @@ function ErrorBox({ message }: { message: string }) {
   return (
     <div
       role="alert"
-      data-chainmap-error=""
+      data-nimmap-error=""
       className="flex gap-2.5 rounded-lg bg-destructive/10 px-3 py-2.5 text-xs leading-relaxed text-destructive"
     >
       <TriangleAlertIcon className="mt-px size-4 shrink-0" />

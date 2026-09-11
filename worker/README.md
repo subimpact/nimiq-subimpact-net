@@ -82,18 +82,22 @@ Kuma's database ids: recreating a monitor there gives it a new one, and the cons
 `src/index.js` has to be edited to match — until then that row simply disappears. Cold
 cost: 1 cache match + 1–2 status fetches + 1 cache put; cached 60s.
 
-## ChainMap paywall
+## NimMap paywall
 
-The ChainMap address mapper is free to depth 3 and paid beyond it. There are no accounts
+The NimMap address mapper is free to depth 3 and paid beyond it. There are no accounts
 and no database: a signature from the connected wallet is the login, and the payment
 transaction on chain is the receipt.
 
 `GET /api/history/:addr?max=20&startAt=<hash>` pages an address's transactions from the
 public RPC node. `max` is 1–50 (default 20); `startAt` is the node's cursor and must be a
 64-char lowercase hex transaction hash. Each row is trimmed to
-`hash, blockNumber, timestamp, confirmations, size, from, to, value, fee` — the node's
-`recipientData` blob runs to hundreds of bytes per staking transaction and is dropped.
-`pagination.nextStartAt` is the last hash of a full page, `null` at the end of the
+`hash, blockNumber, timestamp, confirmations, size, from, to, value, fee` plus the five
+fields the map colours edges by: `fromType`, `toType`, `flags` (ints, 0 when the node
+omits them) and `dataType`/`senderDataType` — the *first byte* of `recipientData` /
+`senderData` as an int, or `null` when there is none. The blobs themselves are dropped:
+a staking `recipientData` runs to hundreds of bytes per row and only that first byte
+says which staking operation it was. `pagination.nextStartAt` is the last hash of a full
+page, `null` at the end of the
 history. A request the node rejects comes back as `400` carrying the node's own message;
 an unreachable node is `502 {"error":"upstream"}`. Pages are cached 60s per
 address + `max` + `startAt`.

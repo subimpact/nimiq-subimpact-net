@@ -1,5 +1,5 @@
 /**
- * End-to-end drive of the real ChainMap island against a fake worker.
+ * End-to-end drive of the real NimMap island against a fake worker.
  *
  * The whole `/api` surface is served by Playwright over a synthetic chain whose
  * shape is known exactly — a binary tree of transfers for the depth tests, a
@@ -67,10 +67,33 @@ function parentOf(index) {
   return Math.floor((index - 21) / 19) + 1
 }
 
+/**
+ * The classification fields the worker lifts out of a row, cycled by edge number so
+ * every transaction family is somewhere on the map — and so a given edge's family is
+ * arithmetic rather than a lookup. Edge *n* is the nth-newest, so the transaction list
+ * under the map reads: stake, reward, contract call, plain transfer, and repeat.
+ */
+function classificationFor(n) {
+  switch (n % 4) {
+    // To the staking contract, recipientData 0x05 — create-staker, "Stake".
+    case 1:
+      return { fromType: 0, toType: 3, flags: 2, recipientData: '05' + '00'.repeat(99), senderData: '' }
+    // Out of the staking contract, senderData 0x01 — remove-stake, the payout.
+    case 2:
+      return { fromType: 3, toType: 0, flags: 0, recipientData: '', senderData: '01' }
+    // A payload between two ordinary accounts: a contract call.
+    case 3:
+      return { fromType: 0, toType: 0, flags: 0, recipientData: 'ff0102', senderData: '' }
+    default:
+      return { fromType: 0, toType: 0, flags: 0, recipientData: '', senderData: '' }
+  }
+}
+
 /** The history the fake worker reports for one address: its parent, its children. */
 function historyFor(index, max) {
   const rows = []
   const push = (from, to, n) => {
+    const { recipientData, senderData, ...types } = classificationFor(n)
     rows.push({
       hash: `${String(from).padStart(4, '0')}${String(to).padStart(4, '0')}`.padEnd(64, 'a'),
       blockNumber: 61000000 + n,
@@ -82,6 +105,10 @@ function historyFor(index, max) {
       to: ADDRESSES[to],
       value: (n + 1) * 100000,
       fee: 0,
+      ...types,
+      // The worker sends the op code, not the blob — this is the shape the map sees.
+      dataType: recipientData ? Number.parseInt(recipientData.slice(0, 2), 16) : null,
+      senderDataType: senderData ? Number.parseInt(senderData.slice(0, 2), 16) : null,
     })
   }
   const parent = parentOf(index)
@@ -148,29 +175,29 @@ async function openMap(context) {
   await page.goto(`${BASE}/graph/`, { waitUntil: 'domcontentloaded' })
   // The island is server-rendered, so the input exists before React owns it —
   // typing into it earlier is thrown away when the controlled value takes over.
-  await page.locator('astro-island[component-export="ChainMap"]:not([ssr])').waitFor({ state: 'attached', timeout: 15000 })
-  await page.locator('[data-chainmap-input]').waitFor({ state: 'visible', timeout: 15000 })
+  await page.locator('astro-island[component-export="NimMap"]:not([ssr])').waitFor({ state: 'attached', timeout: 15000 })
+  await page.locator('[data-nimmap-input]').waitFor({ state: 'visible', timeout: 15000 })
   return { page, errors }
 }
 
 async function scan(page, depth) {
   // Clear first: the counts overlay from the previous scan is still on screen,
   // so waiting for it to appear would pass before this scan even starts.
-  const clear = page.locator('[data-chainmap-clear]')
+  const clear = page.locator('[data-nimmap-clear]')
   if (await clear.count()) {
     await clear.click()
-    await page.locator('[data-chainmap-counts]').waitFor({ state: 'detached', timeout: 15000 })
+    await page.locator('[data-nimmap-counts]').waitFor({ state: 'detached', timeout: 15000 })
   }
   historyRequests.length = 0
-  await page.locator('[data-chainmap-input]').fill(SEED)
-  if (depth) await page.locator(`[data-chainmap-depth="${depth}"]`).click()
-  await page.locator('[data-chainmap-scan]').click()
-  await page.locator('[data-chainmap-counts]').waitFor({ state: 'visible', timeout: 30000 })
+  await page.locator('[data-nimmap-input]').fill(SEED)
+  if (depth) await page.locator(`[data-nimmap-depth="${depth}"]`).click()
+  await page.locator('[data-nimmap-scan]').click()
+  await page.locator('[data-nimmap-counts]').waitFor({ state: 'visible', timeout: 30000 })
 }
 
 /** Sweep the canvas until a click lands on an arrow and opens its panel. */
 async function clickAnyEdge(page) {
-  const canvas = page.locator('canvas[data-chainmap-canvas]')
+  const canvas = page.locator('canvas[data-nimmap-canvas]')
   await canvas.scrollIntoViewIfNeeded()
   const box = await canvas.boundingBox()
   const viewport = page.viewportSize()
@@ -193,7 +220,7 @@ async function clickAnyEdge(page) {
  * fold reaches nothing.
  */
 async function clickAnyNode(page) {
-  const canvas = page.locator('canvas[data-chainmap-canvas]')
+  const canvas = page.locator('canvas[data-nimmap-canvas]')
   await canvas.scrollIntoViewIfNeeded()
   const box = await canvas.boundingBox()
   const viewport = page.viewportSize()
@@ -218,34 +245,34 @@ const freeContext = await makeContext()
 const { page: free, errors: freeErrors } = await openMap(freeContext)
 
 assert(
-  (await free.locator('[data-chainmap-tier="free"]').innerText()).includes('Free'),
+  (await free.locator('[data-nimmap-tier="free"]').innerText()).includes('Free'),
   'a reader with no pass is shown the free tier badge',
 )
 assert(
-  await free.locator('[data-chainmap-depth="4"][data-locked]').isVisible(),
+  await free.locator('[data-nimmap-depth="4"][data-locked]').isVisible(),
   'depths 4 to 6 are marked locked on the free tier',
 )
-assert(await free.locator('[data-chainmap-scan]').isDisabled(), 'Scan is disabled with an empty address')
+assert(await free.locator('[data-nimmap-scan]').isDisabled(), 'Scan is disabled with an empty address')
 
-await free.locator('[data-chainmap-input]').fill('NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXX')
+await free.locator('[data-nimmap-input]').fill('NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXX')
 assert(
-  await free.locator('[data-chainmap-scan]').isDisabled(),
+  await free.locator('[data-nimmap-scan]').isDisabled(),
   'Scan stays disabled for an address that fails its checksum',
 )
-await free.locator('[data-chainmap-input]').fill(SEED)
-assert(await free.locator('[data-chainmap-scan]').isEnabled(), 'Scan enables for a valid address')
+await free.locator('[data-nimmap-input]').fill(SEED)
+assert(await free.locator('[data-nimmap-scan]').isEnabled(), 'Scan enables for a valid address')
 
 // --- depth 1, then depth 3 ------------------------------------------------
 await scan(free, 1)
 assert(
-  (await free.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ') ===
+  (await free.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ') ===
     '3 addresses · 2 transactions',
-  `depth 1 maps the seed and its two counterparties (got "${(await free.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ')}")`,
+  `depth 1 maps the seed and its two counterparties (got "${(await free.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ')}")`,
 )
 assert(historyRequests.length === 1, `depth 1 reads exactly the seed's history (${historyRequests.length} requests)`)
 
 await scan(free, 3)
-const freeCounts = (await free.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ')
+const freeCounts = (await free.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ')
 assert(freeCounts === '15 addresses · 14 transactions', `depth 3 maps 2^4-1 addresses (got "${freeCounts}")`)
 assert(
   historyRequests.length === 7,
@@ -258,25 +285,91 @@ assert(
 
 // --- the boundary ----------------------------------------------------------
 assert(
-  await free.locator('[data-chainmap-limit="depth"]').isVisible(),
+  await free.locator('[data-nimmap-limit="depth"]').isVisible(),
   'hitting the free depth ceiling shows the boundary notice',
 )
 assert(
-  (await free.locator('[data-chainmap-limit="depth"]').innerText()).includes('Free scans stop at depth 3'),
+  (await free.locator('[data-nimmap-limit="depth"]').innerText()).includes('Free scans stop at depth 3'),
   'the notice names the free limits',
 )
-assert(await free.locator('[data-chainmap-unlock]').isVisible(), 'the boundary notice offers the unlock')
+assert(await free.locator('[data-nimmap-unlock]').isVisible(), 'the boundary notice offers the unlock')
+
+// --- the legend and the colour mode ----------------------------------------
+// Before the canvas sweeps below: the legend takes pointer events now, so a sweep
+// click landing on it would toggle the very thing these assertions are reading.
+const legend = free.locator('[data-nimmap-legend]')
+const colorMode = () => free.locator('[data-nimmap-colormode]').getAttribute('data-nimmap-colormode')
+
+assert(await legend.isVisible(), 'the legend is expanded by default on a desktop viewport')
+assert((await colorMode()) === 'type', 'the map colours by transaction type by default')
+const typeRows = await legend.locator('[data-nimmap-legend-edge]').count()
+assert(typeRows >= 6, `Type mode names every transaction family (${typeRows} edge rows, want >= 6)`)
+const legendText = (await legend.innerText()).replace(/\s+/g, ' ')
+const FAMILIES = ['Basic', 'Stake', 'Reward', 'Contract call', 'HTLC', 'Vesting']
+assert(
+  FAMILIES.every((family) => legendText.includes(family)),
+  `the six families are named in the legend (got "${legendText}")`,
+)
+assert(
+  (await legend.innerText()).includes('dashed'),
+  'the legend says the contract-call family is the dashed one',
+)
+assert(
+  (await legend.innerText()).includes('arrow = direction · width = amount'),
+  'the legend keeps the arrow and width note',
+)
+assert(
+  (await legend.locator('svg polygon').count()) === 4,
+  'the node key is four hexagons — seed, address, contract, edge of scan',
+)
+
+await legend.locator('[data-nimmap-colorby="age"]').click()
+await free.locator('[data-nimmap-colormode="age"]').waitFor({ timeout: 5000 })
+assert((await colorMode()) === 'age', 'the Age chip switches the canvas to the age ramp')
+assert(
+  (await legend.locator('[data-nimmap-legend-edge]').count()) === 1 &&
+    (await legend.innerText()).includes('old → recent'),
+  'Age mode replaces the six families with one old-to-recent ramp',
+)
+assert(
+  (await legend.locator('[data-nimmap-colorby="age"]').getAttribute('aria-pressed')) === 'true' &&
+    (await legend.locator('[data-nimmap-colorby="type"]').getAttribute('aria-pressed')) === 'false',
+  'the active chip is the one that is pressed',
+)
+
+await legend.locator('[data-nimmap-colorby="type"]').click()
+await free.locator('[data-nimmap-colormode="type"]').waitFor({ timeout: 5000 })
+assert((await colorMode()) === 'type', 'the Type chip switches back')
+
+await legend.locator('[data-nimmap-legend-toggle]').click()
+await legend.waitFor({ state: 'detached', timeout: 5000 })
+assert(
+  await free.locator('[data-nimmap-legend-toggle]').isVisible(),
+  'the legend folds away to a pill that can bring it back',
+)
+await free.locator('[data-nimmap-legend-toggle]').click()
+await legend.waitFor({ state: 'visible', timeout: 5000 })
+assert(await legend.isVisible(), 'the pill re-opens the legend')
 
 // --- locked depth opens the paywall ---------------------------------------
-await free.locator('[data-chainmap-depth="5"]').click()
-await free.locator('[data-chainmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
+assert(
+  (await free.locator('[data-nimmap-depth="5"]').getAttribute('title')) === 'Depth 4–6 needs a NimMap pass',
+  'a locked depth says which pass it needs',
+)
+await free.locator('[data-nimmap-depth="5"]').click()
+await free.locator('[data-nimmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
 assert(true, 'a locked depth opens the pass dialog instead of scanning')
 assert(
-  (await free.locator('[data-chainmap-depth="3"]').getAttribute('aria-pressed')) === 'true',
+  (await free.locator('[data-nimmap-paywall] [data-slot="dialog-title"]').innerText()).trim() ===
+    'NimMap Pass',
+  'the pass dialog is titled NimMap Pass',
+)
+assert(
+  (await free.locator('[data-nimmap-depth="3"]').getAttribute('aria-pressed')) === 'true',
   'the depth stays where it was when a locked one is clicked',
 )
 await free.keyboard.press('Escape')
-await free.locator('[data-chainmap-paywall]').waitFor({ state: 'hidden' })
+await free.locator('[data-nimmap-paywall]').waitFor({ state: 'hidden' })
 
 // --- detail panels ---------------------------------------------------------
 assert(await clickAnyNode(free), 'clicking a node on the canvas opens its detail panel')
@@ -294,8 +387,8 @@ assert(
   'Escape clears the selection',
 )
 
-const firstRow = free.locator('ul li button').filter({ hasText: '→' }).first()
-await firstRow.click()
+const rows = free.locator('ul li button').filter({ hasText: '→' })
+await rows.first().click()
 await free.getByText('Confirmations').waitFor({ timeout: 10000 })
 assert(true, 'picking a transaction from the list opens the edge panel')
 assert(
@@ -303,49 +396,74 @@ assert(
     (await free.getByText(/ago|in \d/).first().isVisible()),
   'the edge panel carries a relative timestamp',
 )
+
+// The list is newest-first and the fixture cycles the families by edge number, so
+// rows 1-4 are exactly one of each: stake, payout, contract call, plain transfer.
+const kindBadge = free.locator('[data-nimmap-edge-kind]')
+const EXPECTED_KINDS = [
+  { kind: 'stake', label: 'Stake', why: 'recipientData 0x05 to the staking contract' },
+  { kind: 'reward', label: 'Reward', why: 'senderData 0x01 out of the staking contract' },
+  { kind: 'data', label: 'Contract call', why: 'a payload between two basic accounts' },
+]
+for (const [index, expected] of EXPECTED_KINDS.entries()) {
+  await rows.nth(index).click()
+  await kindBadge.waitFor({ timeout: 10000 }).catch(() => {})
+  const got = await kindBadge.innerText().catch(() => '(no badge)')
+  const kind = await kindBadge.getAttribute('data-nimmap-edge-kind').catch(() => null)
+  assert(
+    got.trim() === expected.label && kind === expected.kind,
+    `the edge panel names ${expected.why} "${expected.label}" (got "${got.trim()}"/${kind})`,
+  )
+}
+await rows.nth(3).click()
+await free.getByText('Confirmations').waitFor({ timeout: 10000 })
+assert(
+  (await kindBadge.count()) === 0,
+  'a plain transfer between two basic accounts gets no badge — the amount is the whole story',
+)
 await free.keyboard.press('Escape')
 
 // --- exports are gated -----------------------------------------------------
-await free.locator('[data-chainmap-export-csv]').click()
-await free.locator('[data-chainmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
+await free.locator('[data-nimmap-export-csv]').click()
+await free.locator('[data-nimmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
 assert(true, 'a free reader clicking CSV gets the pass dialog')
 await free.keyboard.press('Escape')
-await free.locator('[data-chainmap-paywall]').waitFor({ state: 'hidden' })
-await free.locator('[data-chainmap-export-png]').click()
-await free.locator('[data-chainmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
+await free.locator('[data-nimmap-paywall]').waitFor({ state: 'hidden' })
+await free.locator('[data-nimmap-export-png]').click()
+await free.locator('[data-nimmap-paywall]').waitFor({ state: 'visible', timeout: 15000 })
 assert(true, 'a free reader clicking PNG gets the pass dialog')
 await free.keyboard.press('Escape')
 
 // --- the address cap -------------------------------------------------------
 topology = 'wide'
 await scan(free, 3)
-const capCounts = (await free.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ')
+const capCounts = (await free.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ')
 assert(capCounts.startsWith('100 addresses'), `the free scan stops at 100 addresses (got "${capCounts}")`)
 assert(
-  await free.locator('[data-chainmap-limit="cap"]').isVisible(),
+  await free.locator('[data-nimmap-limit="cap"]').isVisible(),
   'hitting the address cap shows the cap notice, not a silently truncated map',
 )
 assert(
-  (await free.locator('[data-chainmap-limit="cap"]').innerText()).includes('address cap'),
+  (await free.locator('[data-nimmap-limit="cap"]').innerText()).includes('address cap'),
   'the cap notice says the cap was the reason',
 )
 topology = 'tree'
 
 // --- Stop keeps what was found so far --------------------------------------
 historyDelay = 400
-await free.locator('[data-chainmap-clear]').click()
-await free.locator('[data-chainmap-counts]').waitFor({ state: 'detached', timeout: 15000 })
-await free.locator('[data-chainmap-input]').fill(SEED)
-await free.locator('[data-chainmap-scan]').click()
-await free.locator('[data-chainmap-stop]').waitFor({ state: 'visible', timeout: 10000 })
+await free.locator('[data-nimmap-clear]').click()
+await free.locator('[data-nimmap-counts]').waitFor({ state: 'detached', timeout: 15000 })
+await free.locator('[data-nimmap-input]').fill(SEED)
+await free.locator('[data-nimmap-scan]').click()
+await free.locator('[data-nimmap-stop]').waitFor({ state: 'visible', timeout: 10000 })
 assert(
-  (await free.locator('[data-chainmap-progress]').first().innerText()).includes('addresses'),
+  (await free.locator('[data-nimmap-progress]').first().innerText()).includes('addresses'),
   'a running scan reports its progress',
 )
 await free.waitForTimeout(700)
-await free.locator('[data-chainmap-stop]').click()
-await free.locator('[data-chainmap-counts]').waitFor({ state: 'visible', timeout: 15000 })
-const stoppedCounts = (await free.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ')
+await free.locator('[data-nimmap-stop]').click()
+await free.locator('[data-nimmap-counts]').waitFor({ state: 'visible', timeout: 15000 })
+const stoppedCounts = (await free.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ')
 // How far it gets depends on how many 400ms pages landed first — what matters
 // is that it kept a real partial map and did not run to the full 15.
 const stoppedAddresses = Number(stoppedCounts.split(' ')[0])
@@ -354,21 +472,21 @@ assert(
   `Stop keeps the part of the map that was already found (got "${stoppedCounts}")`,
 )
 assert(
-  (await free.locator('[data-chainmap-limit]').count()) === 0,
+  (await free.locator('[data-nimmap-limit]').count()) === 0,
   'a stopped scan is not reported as having hit a tier limit',
 )
 historyDelay = 0
 
 // --- analytics -------------------------------------------------------------
-const freeEvents = await free.evaluate(() => window.dataLayer.filter((entry) => entry.event?.startsWith('chainmap_')))
+const freeEvents = await free.evaluate(() => window.dataLayer.filter((entry) => entry.event?.startsWith('nimmap_')))
 assert(
-  freeEvents.some((entry) => entry.event === 'chainmap_scan_started' && entry.depth === 3 && entry.tier === 'free'),
-  'chainmap_scan_started carries the depth and the tier',
+  freeEvents.some((entry) => entry.event === 'nimmap_scan_started' && entry.depth === 3 && entry.tier === 'free'),
+  'nimmap_scan_started carries the depth and the tier',
 )
 assert(
-  freeEvents.some((entry) => entry.event === 'chainmap_limit_hit' && entry.limit === 'depth') &&
-    freeEvents.some((entry) => entry.event === 'chainmap_limit_hit' && entry.limit === 'cap'),
-  'chainmap_limit_hit fires for both the depth ceiling and the address cap',
+  freeEvents.some((entry) => entry.event === 'nimmap_limit_hit' && entry.limit === 'depth') &&
+    freeEvents.some((entry) => entry.event === 'nimmap_limit_hit' && entry.limit === 'cap'),
+  'nimmap_limit_hit fires for both the depth ceiling and the address cap',
 )
 
 assert(freeErrors.length === 0, `no uncaught page errors on the free tier (${freeErrors.join(' | ')})`)
@@ -383,18 +501,18 @@ const paidContext = await makeContext()
 await paidContext.addInitScript(() => window.localStorage.setItem('chainmap.token', 'test-sub-token'))
 const { page: paid, errors: paidErrors } = await openMap(paidContext)
 
-await paid.locator('[data-chainmap-tier="paid"]').waitFor({ state: 'visible', timeout: 15000 })
+await paid.locator('[data-nimmap-tier="paid"]').waitFor({ state: 'visible', timeout: 15000 })
 assert(
-  (await paid.locator('[data-chainmap-tier="paid"]').innerText()).includes('21 days left'),
+  (await paid.locator('[data-nimmap-tier="paid"]').innerText()).includes('21 days left'),
   'a stored pass token is re-checked against /api/me and shown as days left',
 )
 assert(
-  (await paid.locator('[data-chainmap-depth="6"]').getAttribute('data-locked')) === null,
+  (await paid.locator('[data-nimmap-depth="6"]').getAttribute('data-locked')) === null,
   'depth 6 is unlocked with a pass',
 )
 
 await scan(paid, 6)
-const paidCounts = (await paid.locator('[data-chainmap-counts]').innerText()).replace(/\s+/g, ' ')
+const paidCounts = (await paid.locator('[data-nimmap-counts]').innerText()).replace(/\s+/g, ' ')
 assert(paidCounts === '127 addresses · 126 transactions', `depth 6 maps 2^7-1 addresses (got "${paidCounts}")`)
 assert(
   historyRequests.length === 63,
@@ -405,16 +523,16 @@ assert(
   'the paid tier reads 50 transactions per address',
 )
 assert(
-  await paid.locator('[data-chainmap-limit]').count() === 0 ||
-    (await paid.locator('[data-chainmap-limit="depth"]').innerText()).includes('The map stops here'),
+  await paid.locator('[data-nimmap-limit]').count() === 0 ||
+    (await paid.locator('[data-nimmap-limit="depth"]').innerText()).includes('The map stops here'),
   'a paid reader at the boundary is told where the map ends, without an upsell',
 )
 
 // --- exports work ----------------------------------------------------------
 const csvPromise = paid.waitForEvent('download', { timeout: 20000 })
-await paid.locator('[data-chainmap-export-csv]').click()
+await paid.locator('[data-nimmap-export-csv]').click()
 const csvDownload = await csvPromise
-assert(/^chainmap-NQ08ACT8T0FE-\d{4}-\d{2}-\d{2}\.csv$/.test(csvDownload.suggestedFilename()),
+assert(/^nimmap-NQ08ACT8T0FE-\d{4}-\d{2}-\d{2}\.csv$/.test(csvDownload.suggestedFilename()),
   `the CSV is named for the seed and the date (got "${csvDownload.suggestedFilename()}")`)
 const csvPath = await csvDownload.path()
 const csvText = await (await import('node:fs/promises')).readFile(csvPath, 'utf8')
@@ -428,36 +546,36 @@ assert(/^NQ[0-9A-Z ]+,NQ[0-9A-Z ]+,\d+,[\d.]+,[0-9a-f]{64},\d{4}-\d{2}-\d{2}T/.t
   `a CSV row is addresses, luna, NIM, hash, ISO timestamp (got "${csvLines[1].slice(0, 90)}")`)
 
 const pngPromise = paid.waitForEvent('download', { timeout: 20000 })
-await paid.locator('[data-chainmap-export-png]').click()
+await paid.locator('[data-nimmap-export-png]').click()
 const pngDownload = await pngPromise
-assert(/^chainmap-NQ08ACT8T0FE-\d{4}-\d{2}-\d{2}\.png$/.test(pngDownload.suggestedFilename()),
+assert(/^nimmap-NQ08ACT8T0FE-\d{4}-\d{2}-\d{2}\.png$/.test(pngDownload.suggestedFilename()),
   `the PNG is named the same way (got "${pngDownload.suggestedFilename()}")`)
 const pngBytes = await (await import('node:fs/promises')).readFile(await pngDownload.path())
 assert(pngBytes.length > 2000 && pngBytes.subarray(1, 4).toString() === 'PNG',
   `the PNG is a real image of a rendered map (${pngBytes.length} bytes)`)
 
-const paidEvents = await paid.evaluate(() => window.dataLayer.filter((entry) => entry.event?.startsWith('chainmap_')))
+const paidEvents = await paid.evaluate(() => window.dataLayer.filter((entry) => entry.event?.startsWith('nimmap_')))
 assert(
-  paidEvents.some((entry) => entry.event === 'chainmap_export' && entry.format === 'csv' && entry.tier === 'paid') &&
-    paidEvents.some((entry) => entry.event === 'chainmap_export' && entry.format === 'png'),
-  'chainmap_export fires for both formats with the tier',
+  paidEvents.some((entry) => entry.event === 'nimmap_export' && entry.format === 'csv' && entry.tier === 'paid') &&
+    paidEvents.some((entry) => entry.event === 'nimmap_export' && entry.format === 'png'),
+  'nimmap_export fires for both formats with the tier',
 )
 
 // --- re-scan from a node ---------------------------------------------------
 const paidNodeHit = await clickAnyNode(paid)
 // A miss is worth looking at rather than guessing about.
-if (!paidNodeHit) await paid.screenshot({ path: '/tmp/chainmap-node-miss.png' })
+if (!paidNodeHit) await paid.screenshot({ path: '/tmp/nimmap-node-miss.png' })
 assert(paidNodeHit, 'a paid reader can open a node panel')
-const rescan = paid.locator('[data-chainmap-rescan]')
+const rescan = paid.locator('[data-nimmap-rescan]')
 if (await rescan.count()) {
   assert((await rescan.innerText()).trim() === 'Scan from here', 'the paid node panel offers a plain re-scan')
   await rescan.click()
   await paid.waitForFunction(
-    (seed) => document.querySelector('[data-chainmap-input]')?.value !== seed,
+    (seed) => document.querySelector('[data-nimmap-input]')?.value !== seed,
     SEED,
     { timeout: 20000 },
   )
-  const newSeed = await paid.locator('[data-chainmap-input]').inputValue()
+  const newSeed = await paid.locator('[data-nimmap-input]').inputValue()
   assert(newSeed.startsWith('NQ') && newSeed !== SEED, `re-scanning from a node makes it the new seed (${newSeed})`)
 } else {
   assert(true, 'the seed panel offers no re-scan (it is already the seed)')

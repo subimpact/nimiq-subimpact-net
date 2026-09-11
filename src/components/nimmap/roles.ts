@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "react"
 import { compactAddress } from "@/lib/nimiq"
-import { API_BASE } from "@/lib/chainmapAuth"
+import { API_BASE } from "@/lib/nimmapAuth"
 import { STAKING_CONTRACT } from "./scan"
 
 export type AddressRole = "validator" | "paywall" | "staking" | null
@@ -28,7 +28,7 @@ export function loadValidatorAddresses(): Promise<Set<string>> {
       return new Set(rows.map((row) => compactAddress(row.address ?? "")).filter(Boolean))
     })
     .catch((error) => {
-      console.debug("chainmap: validator list failed", error)
+      console.debug("nimmap: validator list failed", error)
       // Reset so the next panel can try again rather than caching a failure.
       validatorsPromise = null
       return new Set<string>()
@@ -42,7 +42,7 @@ export function loadPaywallAddress(): Promise<string | null> {
     .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
     .then((payload: { paywallAddress?: string }) => payload?.paywallAddress ?? null)
     .catch((error) => {
-      console.debug("chainmap: quote failed", error)
+      console.debug("nimmap: quote failed", error)
       paywallPromise = null
       return null
     })
@@ -72,7 +72,7 @@ export async function loadQuote(): Promise<Quote | null> {
       paywallAddress: payload.paywallAddress,
     }
   } catch (error) {
-    console.debug("chainmap: quote failed", error)
+    console.debug("nimmap: quote failed", error)
     return null
   }
 }
@@ -128,7 +128,7 @@ export function useBalance(address: string | null): number | null | undefined {
       })
       .catch((error) => {
         if (cancelled) return
-        console.debug("chainmap: balance failed", error)
+        console.debug("nimmap: balance failed", error)
         setBalance(null)
       })
 

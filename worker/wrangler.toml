@@ -7,10 +7,10 @@ routes = [
 ]
 
 [vars]
-# Where a ChainMap pass is paid. Public by design — it is printed in /api/quote.
+# Where a NimMap pass is paid. Public by design — it is printed in /api/quote.
 PAYWALL_ADDRESS = "NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC"
 
-# Wallets that hold a ChainMap pass without paying — the operator's own. Comma-separated,
+# Wallets that hold a NimMap pass without paying — the operator's own. Comma-separated,
 # any spacing or casing. Public like the address above: being named here grants nothing on
 # its own, since the wallet still has to sign in with its key before the list is consulted.
 # Granting and revoking is editing this line and redeploying; there is nothing else to undo.

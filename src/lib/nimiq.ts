@@ -25,7 +25,7 @@ const ADDRESS_SHAPE = /^NQ[0-9]{2}[0-9A-HJ-NP-VXY]{32}$/
 /**
  * True only for an address that is also self-consistent — the IBAN mod-97 check
  * the two digits after NQ carry. A single mistyped character fails it, which is
- * why the ChainMap input can refuse to start a scan before spending a request.
+ * why the NimMap input can refuse to start a scan before spending a request.
  */
 export function isValidAddress(raw: string): boolean {
   const clean = compactAddress(raw)

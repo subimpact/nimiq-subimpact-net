@@ -1,4 +1,4 @@
-# stake-e2e — browser tests for the staking dialog and ChainMap
+# stake-e2e — browser tests for the staking dialog and NimMap
 
 These drive the **real** components against a **fake Nimiq Hub**: a page served by
 Playwright that speaks the same `postMessage` RPC the real Hub does, so `HubApi`, the
@@ -20,6 +20,7 @@ node stake-e2e/pages-check.mjs
 node stake-e2e/responsive-check.mjs
 node stake-e2e/chainmap-e2e.mjs
 node stake-e2e/chainmap-paywall-e2e.mjs
+node stake-e2e/chainmap-perf.mjs
 ```
 
 - `stake-smoke` — dialog opens, chunk loads lazily, Hub popup is the real hub.nimiq.com.
@@ -29,8 +30,13 @@ node stake-e2e/chainmap-paywall-e2e.mjs
 - `responsive-check` — no horizontal overflow at three viewports; both maps fill their shell.
 - `chainmap-e2e` — the scan engine and the map, over a synthetic chain of known shape.
 - `chainmap-paywall-e2e` — sign-in, checkout, payment polling, renewal and sign-out.
+- `chainmap-perf` — frame rate of the map under a settled and a synthetic worst-case layout.
 
-### How the ChainMap suites fake a chain
+The three `chainmap-*` files keep their old names: the map was renamed ChainMap → NimMap,
+but a test file is not user-facing and renaming it would break every shell history, note
+and runbook that names it. Everything *inside* them speaks NimMap.
+
+### How the NimMap suites fake a chain
 
 `chainmap-e2e` serves the whole `/api` surface from a generated graph: a binary tree of
 transfers for the depth tests (depth *d* must map exactly 2^(d+1)−1 addresses and one
@@ -48,6 +54,6 @@ header would otherwise swallow the clicks and navigate away.
 
 - Playwright is imported from a machine-local path; adjust the import if this moves.
 - The preview must serve `dist/` on `http://localhost:4331` (the scripts' BASE).
-- The ChainMap island is server-rendered, so its input exists before React owns it.
-  Every script waits for `astro-island[component-export="ChainMap"]:not([ssr])` before
+- The NimMap island is server-rendered, so its input exists before React owns it.
+  Every script waits for `astro-island[component-export="NimMap"]:not([ssr])` before
   typing — text entered earlier is discarded when the controlled value takes over.

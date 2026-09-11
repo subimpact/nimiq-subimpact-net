@@ -1,5 +1,5 @@
 /**
- * The ChainMap pass, end to end: wallet → signature → payment → unlocked.
+ * The NimMap pass, end to end: wallet → signature → payment → unlocked.
  *
  * As in stake-e2e.mjs, hub.nimiq.com is served by Playwright as a page speaking
  * the same postMessage RPC the real Hub does, so HubApi, the popup handshake and
@@ -92,7 +92,7 @@ async function openMap({ worker = {}, token = null } = {}) {
       const nonce = `nonce-${nonceCount}`
       return json({
         nonce,
-        message: `nimiq.subimpact.net ChainMap sign-in\nnonce: ${nonce}`,
+        message: `nimiq.subimpact.net NimMap sign-in\nnonce: ${nonce}`,
         expiresInMs: 600000,
       })
     }
@@ -156,20 +156,27 @@ async function openMap({ worker = {}, token = null } = {}) {
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (error) => errors.push(String(error)))
+  // Subscribed before the navigation, not after it. A stored token is checked during
+  // hydration, and hydration is what the two waits below are waiting for — so a caller
+  // that asked for /api/me afterwards was racing an event that had usually already
+  // fired, and lost about two runs in three.
+  const meAnswered = token
+    ? page.waitForResponse((response) => response.url().includes('/api/me'), { timeout: 20000 })
+    : Promise.resolve(null)
   await page.goto(`${BASE}/graph/`, { waitUntil: 'domcontentloaded' })
   // Wait for the island to own the DOM before touching its controls.
-  await page.locator('astro-island[component-export="ChainMap"]:not([ssr])').waitFor({ state: 'attached', timeout: 15000 })
-  await page.locator('[data-chainmap-input]').waitFor({ state: 'visible', timeout: 15000 })
-  return { context, page, errors, hubRequests, verifyRequests, entitlementRequests }
+  await page.locator('astro-island[component-export="NimMap"]:not([ssr])').waitFor({ state: 'attached', timeout: 15000 })
+  await page.locator('[data-nimmap-input]').waitFor({ state: 'visible', timeout: 15000 })
+  return { context, page, errors, meAnswered, hubRequests, verifyRequests, entitlementRequests }
 }
 
 async function signIn(page) {
-  await page.locator('[data-chainmap-tier]').click()
-  const dialog = page.locator('[data-chainmap-paywall]')
+  await page.locator('[data-nimmap-tier]').click()
+  const dialog = page.locator('[data-nimmap-paywall]')
   await dialog.waitFor({ state: 'visible', timeout: 15000 })
-  await dialog.locator('[data-chainmap-connect]').click()
-  await dialog.locator('[data-chainmap-sign]').waitFor({ state: 'visible', timeout: 20000 })
-  await dialog.locator('[data-chainmap-sign]').click()
+  await dialog.locator('[data-nimmap-connect]').click()
+  await dialog.locator('[data-nimmap-sign]').waitFor({ state: 'visible', timeout: 20000 })
+  await dialog.locator('[data-nimmap-sign]').click()
   return dialog
 }
 
@@ -189,12 +196,24 @@ async function signIn(page) {
     },
   })
 
+  await page.locator('[data-nimmap-tier]').click()
+  const titleBefore = await page
+    .locator('[data-nimmap-paywall] [data-slot="dialog-title"]')
+    .innerText()
+  assert(titleBefore.trim() === 'NimMap Pass', `the pass is called the NimMap Pass (got "${titleBefore.trim()}")`)
+  await page.keyboard.press('Escape')
+  await page.locator('[data-nimmap-paywall]').waitFor({ state: 'hidden' })
+
   const dialog = await signIn(page)
   await page.getByText('Your pass is active').waitFor({ timeout: 20000 })
   assert(true, 'a wallet that has already paid unlocks straight after signing')
 
   const hubRequest = hubRequests[0] ?? {}
-  assert(hubRequest.appName === 'ImpactZero ChainMap', `the Hub is told the app name (${hubRequest.appName})`)
+  assert(hubRequest.appName === 'ImpactZero NimMap', `the Hub is told the app name (${hubRequest.appName})`)
+  assert(
+    typeof hubRequest.message === 'string' && hubRequest.message.includes('NimMap sign-in'),
+    `the sentence the wallet is asked to sign names NimMap (${hubRequest.message})`,
+  )
   assert(hubRequest.signer === WALLET, 'the Hub is asked to sign with the account that was chosen')
   assert(
     typeof hubRequest.message === 'string' && hubRequest.message.includes('nonce: nonce-1'),
@@ -210,27 +229,27 @@ async function signIn(page) {
 
   await dialog.getByRole('button', { name: 'Start mapping' }).click()
   await dialog.waitFor({ state: 'hidden' })
-  await page.locator('[data-chainmap-tier="paid"]').waitFor({ timeout: 10000 })
+  await page.locator('[data-nimmap-tier="paid"]').waitFor({ timeout: 10000 })
   assert(
-    (await page.locator('[data-chainmap-tier="paid"]').innerText()).includes('30 days left'),
+    (await page.locator('[data-nimmap-tier="paid"]').innerText()).includes('30 days left'),
     'the tier badge switches to the pass with its days left',
   )
   assert(
-    (await page.locator('[data-chainmap-depth="6"]').getAttribute('data-locked')) === null,
+    (await page.locator('[data-nimmap-depth="6"]').getAttribute('data-locked')) === null,
     'depth 6 unlocks in the controls',
   )
   assert(
     (await page.evaluate(() => window.localStorage.getItem('chainmap.token'))) === 'sub-token-1',
     'the pass token is kept for the next visit',
   )
-  const events = await page.evaluate(() => window.dataLayer.filter((e) => e.event?.startsWith('chainmap_')))
+  const events = await page.evaluate(() => window.dataLayer.filter((e) => e.event?.startsWith('nimmap_')))
   assert(
-    events.some((e) => e.event === 'chainmap_signin_started'),
-    'chainmap_signin_started fires when the wallet is asked for',
+    events.some((e) => e.event === 'nimmap_signin_started'),
+    'nimmap_signin_started fires when the wallet is asked for',
   )
   assert(
-    events.some((e) => e.event === 'chainmap_unlock_success' && e.daysLeft === 30),
-    'chainmap_unlock_success carries the days left',
+    events.some((e) => e.event === 'nimmap_unlock_success' && e.daysLeft === 30),
+    'nimmap_unlock_success carries the days left',
   )
   assert(errors.length === 0, `no uncaught page errors (${errors.join(' | ')})`)
   await context.close()
@@ -245,11 +264,11 @@ async function signIn(page) {
   })
 
   const dialog = await signIn(page)
-  await dialog.locator('[data-chainmap-check]').waitFor({ timeout: 20000 })
+  await dialog.locator('[data-nimmap-check]').waitFor({ timeout: 20000 })
   assert(true, 'a wallet with no payment lands on the checkout step')
   assert(
-    (await dialog.locator('[data-chainmap-amount]').innerText()).trim() === '76,639 NIM',
-    `the amount to send is the required luna, rounded up (got "${(await dialog.locator('[data-chainmap-amount]').innerText()).trim()}")`,
+    (await dialog.locator('[data-nimmap-amount]').innerText()).trim() === '76,639 NIM',
+    `the amount to send is the required luna, rounded up (got "${(await dialog.locator('[data-nimmap-amount]').innerText()).trim()}")`,
   )
   assert(
     (await dialog.innerText()).includes('$29.99'),
@@ -265,14 +284,14 @@ async function signIn(page) {
   )
 
   const checkoutEvents = await page.evaluate(() =>
-    window.dataLayer.filter((e) => e.event === 'chainmap_checkout_viewed'),
+    window.dataLayer.filter((e) => e.event === 'nimmap_checkout_viewed'),
   )
   assert(
     checkoutEvents.some((e) => e.requiredLuna === REQUIRED_LUNA && e.priceUsd === 29.99),
-    'chainmap_checkout_viewed carries the amount and the price',
+    'nimmap_checkout_viewed carries the amount and the price',
   )
 
-  await dialog.locator('[data-chainmap-check]').click()
+  await dialog.locator('[data-nimmap-check]').click()
   assert(
     (await dialog.innerText()).includes('Waiting for the network to confirm'),
     'the first check that finds nothing says it is waiting for the network',
@@ -289,14 +308,14 @@ async function signIn(page) {
   )
 
   const paymentEvents = await page.evaluate(() =>
-    window.dataLayer.filter((e) => e.event === 'chainmap_payment_check'),
+    window.dataLayer.filter((e) => e.event === 'nimmap_payment_check'),
   )
   assert(
     paymentEvents.length === 2 && paymentEvents[0].found === false && paymentEvents[1].found === true,
-    'chainmap_payment_check records each attempt and whether it found the payment',
+    'nimmap_payment_check records each attempt and whether it found the payment',
   )
 
-  await page.locator('[data-chainmap-tier="paid"]').waitFor({ timeout: 10000 })
+  await page.locator('[data-nimmap-tier="paid"]').waitFor({ timeout: 10000 })
   assert(true, 'the badge shows the pass once the payment lands')
   assert(errors.length === 0, `no uncaught page errors (${errors.join(' | ')})`)
   await context.close()
@@ -310,7 +329,7 @@ async function signIn(page) {
     worker: { verify: { entitled: false, reason: 'amount_too_low' } },
   })
   const dialog = await signIn(page)
-  await dialog.locator('[data-chainmap-check]').waitFor({ timeout: 20000 })
+  await dialog.locator('[data-nimmap-check]').waitFor({ timeout: 20000 })
   const text = await dialog.innerText()
   assert(
     text.includes('below the pass price') && text.includes('76,639 NIM'),
@@ -328,14 +347,14 @@ async function signIn(page) {
     token: 'old-sub-token',
   })
 
-  await page.locator('[data-chainmap-tier="expired"]').waitFor({ timeout: 15000 })
+  await page.locator('[data-nimmap-tier="expired"]').waitFor({ timeout: 15000 })
   assert(true, 'a genuine token with a spent pass shows as expired rather than as free')
   assert(
-    (await page.locator('[data-chainmap-tier="expired"]').innerText()).includes('renew'),
+    (await page.locator('[data-nimmap-tier="expired"]').innerText()).includes('renew'),
     'the expired badge offers to renew',
   )
-  await page.locator('[data-chainmap-tier="expired"]').click()
-  const dialog = page.locator('[data-chainmap-paywall]')
+  await page.locator('[data-nimmap-tier="expired"]').click()
+  const dialog = page.locator('[data-nimmap-paywall]')
   await dialog.waitFor({ state: 'visible', timeout: 15000 })
   assert(
     (await dialog.innerText()).includes('previous pass has run out'),
@@ -352,20 +371,20 @@ async function signIn(page) {
 // 5. A token we did not sign is dropped; a rejected signature is explained
 // ===========================================================================
 {
-  const { context, page } = await openMap({
+  const { context, page, meAnswered } = await openMap({
     worker: { me: { status: 401, body: { error: 'invalid token' } } },
     token: 'tampered-token',
   })
   // The badge reads "Free" from the first paint, so waiting for it would prove
   // nothing — wait for the answer to /api/me instead.
-  await page.waitForResponse((response) => response.url().includes('/api/me'), { timeout: 15000 })
+  await meAnswered
   const cleared = await page
     .waitForFunction(() => window.localStorage.getItem('chainmap.token') === null, { timeout: 10000 })
     .then(() => true)
     .catch(() => false)
   assert(cleared, 'a token the worker will not accept is cleared from storage')
   assert(
-    await page.locator('[data-chainmap-tier="free"]').isVisible(),
+    await page.locator('[data-nimmap-tier="free"]').isVisible(),
     'a tampered pass token leaves the reader on the free tier',
   )
   await context.close()
@@ -376,9 +395,9 @@ async function signIn(page) {
     worker: { verify: { status: 401, body: { error: 'invalid signature' } } },
   })
   const dialog = await signIn(page)
-  await dialog.locator('[data-chainmap-error]').waitFor({ timeout: 20000 })
+  await dialog.locator('[data-nimmap-error]').waitFor({ timeout: 20000 })
   assert(
-    (await dialog.locator('[data-chainmap-error]').innerText()).includes('signature did not check out'),
+    (await dialog.locator('[data-nimmap-error]').innerText()).includes('signature did not check out'),
     'a rejected signature is explained as a signature problem',
   )
   await context.close()
@@ -389,9 +408,9 @@ async function signIn(page) {
     worker: { verify: { status: 401, body: { error: 'address mismatch' } } },
   })
   const dialog = await signIn(page)
-  await dialog.locator('[data-chainmap-error]').waitFor({ timeout: 20000 })
+  await dialog.locator('[data-nimmap-error]').waitFor({ timeout: 20000 })
   assert(
-    (await dialog.locator('[data-chainmap-error]').innerText()).includes('different account'),
+    (await dialog.locator('[data-nimmap-error]').innerText()).includes('different account'),
     'an address mismatch gets its own message, not the signature one',
   )
   await context.close()
@@ -402,9 +421,9 @@ async function signIn(page) {
     worker: { verify: { status: 401, body: { error: 'invalid nonce' } } },
   })
   const dialog = await signIn(page)
-  await dialog.locator('[data-chainmap-error]').waitFor({ timeout: 20000 })
+  await dialog.locator('[data-nimmap-error]').waitFor({ timeout: 20000 })
   assert(
-    (await dialog.locator('[data-chainmap-error]').innerText()).includes('expired'),
+    (await dialog.locator('[data-nimmap-error]').innerText()).includes('expired'),
     'a stale challenge is explained as an expiry, with the ten-minute window',
   )
   await context.close()
@@ -418,25 +437,29 @@ async function signIn(page) {
     worker: { me: { entitled: true, address: WALLET, paidUntil: Date.now() + 9 * DAY, daysLeft: 9, expiresInMs: 9 * DAY } },
     token: 'sub-token-live',
   })
-  await page.locator('[data-chainmap-tier="paid"]').waitFor({ timeout: 15000 })
-  await page.locator('[data-chainmap-tier="paid"]').click()
-  const dialog = page.locator('[data-chainmap-paywall]')
+  await page.locator('[data-nimmap-tier="paid"]').waitFor({ timeout: 15000 })
+  await page.locator('[data-nimmap-tier="paid"]').click()
+  const dialog = page.locator('[data-nimmap-paywall]')
   await dialog.waitFor({ state: 'visible', timeout: 15000 })
   assert(
-    (await dialog.locator('[data-chainmap-days-left]').innerText()).trim() === '9',
+    (await dialog.locator('[data-nimmap-days-left]').innerText()).trim() === '9',
     'the manage dialog counts the days left',
+  )
+  assert(
+    (await dialog.locator('[data-slot="dialog-title"]').innerText()).trim() === 'Your NimMap pass',
+    'the manage dialog calls it your NimMap pass',
   )
   assert(
     (await dialog.innerText()).includes(WALLET.slice(0, 9)),
     'the manage dialog names the signed-in wallet',
   )
-  await dialog.locator('[data-chainmap-refresh]').click()
+  await dialog.locator('[data-nimmap-refresh]').click()
   await page.waitForTimeout(500)
   assert(await dialog.isVisible(), 'Refresh status re-checks the pass without closing the dialog')
 
   await dialog.getByRole('button', { name: 'Sign out' }).click()
   await dialog.waitFor({ state: 'hidden' })
-  await page.locator('[data-chainmap-tier="free"]').waitFor({ timeout: 10000 })
+  await page.locator('[data-nimmap-tier="free"]').waitFor({ timeout: 10000 })
   assert(true, 'signing out drops back to the free tier')
   assert(
     (await page.evaluate(() => window.localStorage.getItem('chainmap.token'))) === null,
@@ -465,7 +488,7 @@ async function signIn(page) {
     token: 'sub-token-comp',
   })
 
-  const badge = page.locator('[data-chainmap-tier="paid"]')
+  const badge = page.locator('[data-nimmap-tier="paid"]')
   await badge.waitFor({ timeout: 15000 })
   const badgeText = (await badge.innerText()).replace(/\s+/g, ' ')
   assert(
@@ -477,19 +500,19 @@ async function signIn(page) {
     'the badge never counts out the five-digit day total behind a comp pass',
   )
   assert(
-    (await page.locator('[data-chainmap-paywall]').count()) === 0,
+    (await page.locator('[data-nimmap-paywall]').count()) === 0,
     'the paywall never opens itself for an entitled comp wallet',
   )
   assert(
-    (await page.locator('[data-chainmap-depth="6"]').getAttribute('data-locked')) === null,
+    (await page.locator('[data-nimmap-depth="6"]').getAttribute('data-locked')) === null,
     'a comp pass is the paid tier: depth 6 is unlocked',
   )
 
   await badge.click()
-  const dialog = page.locator('[data-chainmap-paywall]')
+  const dialog = page.locator('[data-nimmap-paywall]')
   await dialog.waitFor({ state: 'visible', timeout: 15000 })
   assert(
-    (await dialog.locator('[data-chainmap-days-left]').innerText()).trim() === 'Owner',
+    (await dialog.locator('[data-nimmap-days-left]').innerText()).trim() === 'Owner',
     'the manage dialog names the pass rather than counting days',
   )
   assert((await dialog.innerText()).includes('Never'), 'the manage dialog says it never expires')

@@ -145,6 +145,11 @@ export function buildMap(result: ScanResult): MapModel {
       timestamp: edge.timestamp,
       blockNumber: edge.blockNumber,
       confirmations: edge.confirmations,
+      fromType: edge.fromType,
+      toType: edge.toType,
+      flags: edge.flags,
+      dataType: edge.dataType,
+      senderDataType: edge.senderDataType,
       width: edgeWidthFor(edge.value / 1e5),
       bow: 0,
     })

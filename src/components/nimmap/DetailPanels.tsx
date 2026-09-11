@@ -6,6 +6,7 @@ import { compactAddress, explorerUrl, formatNimFull, shortAddress } from "@/lib/
 import { absoluteTime, relativeTime } from "./format"
 import { useAddressRole, useBalance } from "./roles"
 import { STAKING_CONTRACT } from "./scan"
+import { edgeKind, edgeKindLabel } from "./txKinds"
 import type { MapGraphEdge, MapGraphNode, Tier } from "./types"
 
 const ROLE_LABEL: Record<string, string> = {
@@ -123,7 +124,7 @@ export function NodeDetail({
           <Button
             size="xs"
             variant="outline"
-            data-chainmap-rescan=""
+            data-nimmap-rescan=""
             onClick={() => (tier === "paid" ? onRescan(node) : onUnlock())}
           >
             {tier === "paid" ? "Scan from here" : "Scan from here — Pass"}
@@ -146,14 +147,21 @@ export function EdgeDetail({ edge, onClose }: { edge: MapGraphEdge; onClose: () 
   const staking =
     compactAddress(edge.source.address) === STAKING_KEY ||
     compactAddress(edge.target.address) === STAKING_KEY
+  // What the chain said this transaction was — "Unstake", "Reward", "Contract call".
+  // A plain transfer says nothing: the amount and the two addresses are the whole story.
+  const kind = edgeKindLabel(edge)
 
   return (
     <PanelShell
       title="Transaction"
       badge={
-        staking ? (
-          <Badge variant="outline" className="border-primary/40 text-primary">
-            Staking
+        kind ? (
+          <Badge
+            variant="outline"
+            data-nimmap-edge-kind={edgeKind(edge)}
+            className={staking ? "border-primary/40 text-primary" : "text-muted-foreground"}
+          >
+            {kind}
           </Badge>
         ) : undefined
       }

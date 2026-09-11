@@ -1,5 +1,5 @@
 // Desktop-wide layout check: no horizontal overflow at any viewport, and both
-// maps — ChainMap at /graph/ and the delegation map at /validators/?view=map —
+// maps — NimMap at /graph/ and the delegation map at /validators/?view=map —
 // actually fill a desktop screen. All API data is mocked so the canvases render
 // without the live API.
 import { chromium } from '/root/projects/alphaaccess-my/e2e/node_modules/playwright/index.mjs';
@@ -8,7 +8,7 @@ const BASE = process.env.BASE || 'http://localhost:4331';
 const PATHS = ['/', '/validators/', '/graph/', '/validators/?view=map'];
 const SEED = 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY';
 const COUNTERPARTY = 'NQ27 NCB1 3CYU 9P4L EM2V D7L2 28QE 36PA EXB1';
-// `minCanvas` is the ChainMap target — /graph/ keeps the near-full-bleed 1920px
+// `minCanvas` is the NimMap target — /graph/ keeps the near-full-bleed 1920px
 // shell, because the map is the page. `minMapCard` is the delegation map's, now
 // that it lives inside the 1600px shell every other content page uses.
 const VIEWPORTS = [
@@ -44,7 +44,7 @@ const GRAPH_BODY = JSON.stringify({
 
 const browser = await chromium.launch();
 const context = await browser.newContext();
-/** Two hops of flow, enough for ChainMap to draw something measurable. */
+/** Two hops of flow, enough for NimMap to draw something measurable. */
 const HISTORY_BODY = JSON.stringify({
   data: [
     {
@@ -145,15 +145,15 @@ for (const vp of VIEWPORTS) {
       `${path}: no horizontal overflow (scrollWidth ${box.scrollWidth} <= innerWidth ${box.innerWidth})`,
     );
 
-    const isChainMap = path === '/graph/';
-    if (isChainMap || path.includes('view=map')) {
-      // ChainMap draws nothing until it is given an address to follow.
-      if (isChainMap) {
+    const isNimMap = path === '/graph/';
+    if (isNimMap || path.includes('view=map')) {
+      // NimMap draws nothing until it is given an address to follow.
+      if (isNimMap) {
         await page
-          .locator('astro-island[component-export="ChainMap"]:not([ssr])')
+          .locator('astro-island[component-export="NimMap"]:not([ssr])')
           .waitFor({ state: 'attached', timeout: 15000 });
-        await page.locator('[data-chainmap-input]').fill(SEED);
-        await page.locator('[data-chainmap-scan]').click();
+        await page.locator('[data-nimmap-input]').fill(SEED);
+        await page.locator('[data-nimmap-scan]').click();
       }
       const canvas = page.locator('canvas').first();
       await canvas.waitFor({ state: 'visible', timeout: 20000 });
@@ -166,14 +166,71 @@ for (const vp of VIEWPORTS) {
         };
       });
       console.log(`      canvas ${rect.w} x ${rect.h} px · map card ${rect.cardW} x ${rect.cardH} px`);
-      const target = isChainMap ? vp.minCanvas : vp.minMapCard;
+      const target = isNimMap ? vp.minCanvas : vp.minMapCard;
       if (target) {
         assert(rect.cardW >= target, `${path}: map card width ${rect.cardW} >= ${target}`);
         // The delegation map keeps an 18rem cluster sidebar inside its card, so
-        // its canvas can never be wider than the card − 288px. ChainMap has no
+        // its canvas can never be wider than the card − 288px. NimMap has no
         // sidebar and should take essentially the whole card.
-        const floor = isChainMap ? target - 60 : target - 300;
+        const floor = isNimMap ? target - 60 : target - 300;
         assert(rect.w >= floor, `${path}: canvas takes the card it is given (${rect.w} >= ${floor})`);
+      }
+
+      if (isNimMap) {
+        // The legend is expanded on a desktop and folded to a pill on a phone, where
+        // 390px has no room to spend on a key nobody asked for. Either way it has to
+        // fit inside the canvas it sits on top of.
+        const expanded = await page.locator('[data-nimmap-legend]').count();
+        const pill = await page.locator('[data-nimmap-legend-toggle]').count();
+        if (vp.width >= 640) {
+          assert(expanded === 1, `${path} @ ${vp.name}: the legend opens expanded on a desktop`);
+        } else {
+          assert(
+            expanded === 0 && pill === 1,
+            `${path} @ ${vp.name}: the legend starts folded to a pill on a phone`,
+          );
+          await page.locator('[data-nimmap-legend-toggle]').click();
+          await page.locator('[data-nimmap-legend]').waitFor({ timeout: 5000 });
+        }
+        const fits = await page.locator('[data-nimmap-legend]').evaluate((el) => {
+          const legend = el.getBoundingClientRect();
+          const shell = el.parentElement.getBoundingClientRect();
+          return {
+            ok: legend.left >= shell.left - 1 && legend.right <= shell.right + 1,
+            w: Math.round(legend.width),
+            shellW: Math.round(shell.width),
+          };
+        });
+        assert(
+          fits.ok,
+          `${path} @ ${vp.name}: the open legend fits the map (${fits.w}px inside ${fits.shellW}px)`,
+        );
+        assert(
+          (await page.locator('[data-nimmap-colormode]').getAttribute('data-nimmap-colormode')) === 'type',
+          `${path} @ ${vp.name}: the map opens coloured by transaction type`,
+        );
+
+        // A detail panel is bottom-left and, on a phone, as wide as the canvas. The
+        // legend has to get out of its way there and stay put on a desktop. Driven
+        // from the transaction list rather than by sweeping the canvas for a hit.
+        const row = page.locator('ul li button').filter({ hasText: '→' }).first();
+        if (await row.count()) {
+          await row.click();
+          await page.getByText('Confirmations').first().waitFor({ timeout: 10000 });
+          const stillThere = await page
+            .locator('[data-nimmap-legend], [data-nimmap-legend-toggle]')
+            .first()
+            .isVisible();
+          assert(
+            vp.width >= 640 ? stillThere : !stillThere,
+            vp.width >= 640
+              ? `${path} @ ${vp.name}: the legend stays put beside an open detail panel`
+              : `${path} @ ${vp.name}: the legend yields to the detail panel it would cover`,
+          );
+          await page.keyboard.press('Escape');
+          await page.locator('[data-nimmap-legend], [data-nimmap-legend-toggle]').first().waitFor({ timeout: 5000 });
+          assert(true, `${path} @ ${vp.name}: closing the panel brings the legend back`);
+        }
       }
     }
 

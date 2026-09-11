@@ -34,6 +34,38 @@ for (const path of ['/validators/', '/graph/']) {
   );
 }
 
+// The map is called NimMap, in all three places every page links to it from. The old
+// name must not survive anywhere a reader can see it.
+for (const path of ['/', '/validators/', '/graph/']) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  const links = await page.locator('a[href="/graph/"]').allInnerTexts();
+  assert(
+    links.length === 3 && links.every((text) => text.trim() === 'NimMap'),
+    `${path}: nav, footer and bottom bar all link to /graph/ as "NimMap" (${JSON.stringify(links)})`,
+  );
+  const body = await page.locator('body').innerText();
+  assert(!body.includes('ChainMap'), `${path}: the old name is nowhere on the page`);
+}
+
+await page.goto(BASE + '/graph/', { waitUntil: 'domcontentloaded' });
+assert(
+  (await page.title()) === 'NimMap — follow the money on Nimiq',
+  `/graph/: the page is titled for NimMap (got "${await page.title()}")`,
+);
+const graphCopy = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+assert(
+  graphCopy.includes('every hexagon is an address'),
+  '/graph/: the intro says addresses are hexagons',
+);
+assert(
+  graphCopy.includes('colour is what kind of transaction it was'),
+  '/graph/: the intro says colour is the transaction family, not age',
+);
+assert(
+  graphCopy.includes('Type / Age chips') && graphCopy.includes('4 to 6 needs a pass'),
+  '/graph/: the copy names the colour toggle and where the depth ceiling is',
+);
+
 // The remaining plain nimiq.com/staking links, if any, across all pages.
 for (const path of ['/', '/validators/', '/graph/']) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });

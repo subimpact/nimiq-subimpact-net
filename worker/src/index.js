@@ -1,6 +1,6 @@
 /**
  * nimiq-api — CORS proxy for NimiqHub REST data, plus a transaction relay and the
- * ChainMap paywall.
+ * NimMap paywall.
  *
  * api.nimiqhub.com serves the data we need but sends no Access-Control-Allow-Origin
  * header, so nimiq.subimpact.net cannot call it from the browser. This worker fronts
@@ -15,7 +15,7 @@
  * transaction to a public Nimiq RPC node — see `broadcastTransaction`. It holds no
  * keys and signs nothing; the signature is produced in the Nimiq Hub popup.
  *
- * The ChainMap paywall adds six routes with no accounts and no database behind them:
+ * The NimMap paywall adds six routes with no accounts and no database behind them:
  * /api/history reads an address's transactions, /api/quote prices the pass in NIM,
  * /api/auth/nonce and /api/auth/verify sign a wallet in, /api/entitlement looks for the
  * payment on-chain and mints a bearer token, and /api/me re-checks that token. The chain
@@ -112,7 +112,7 @@ const STATUS_MAX_BEATS = 100;
 // genuinely down still costs at most two subrequests per cold request.
 const STATUS_ATTEMPTS = 2;
 
-// --- ChainMap paywall -------------------------------------------------------
+// --- NimMap paywall ---------------------------------------------------------
 
 // Transaction hashes are 32 bytes, rendered lowercase hex. The RPC's `startAt`
 // cursor is one of these or null, and rejects anything else.
@@ -352,7 +352,7 @@ function corsHeaders(origin) {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
     headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
-    // Authorization carries the ChainMap pass token on /api/me.
+    // Authorization carries the NimMap pass token on /api/me.
     headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization';
     headers['Access-Control-Max-Age'] = '86400';
   }
@@ -934,7 +934,7 @@ async function broadcastTransaction(request) {
   return jsonResponse({ result: hash }, 200);
 }
 
-// --- ChainMap paywall -------------------------------------------------------
+// --- NimMap paywall ---------------------------------------------------------
 
 /** The paywall address as canonical 4-char blocks; the var wins, the constant backs it. */
 function paywallAddress(env) {
@@ -1015,13 +1015,41 @@ async function fetchTransactions(address, max, startAt) {
 }
 
 /**
+ * The op code of a Nimiq data blob: its first byte, as an int.
+ *
+ * `senderData` and `recipientData` arrive as lowercase hex strings, and for every
+ * transaction family the map colours, the first byte alone says which one it is — a
+ * staking `recipientData` runs to hundreds of bytes, of which 531 are the validator key
+ * material nobody is drawing. Returns null for an empty, short or non-hex blob, which
+ * the client reads as "this transaction carried no data".
+ */
+function dataOpCode(raw) {
+  if (typeof raw !== 'string') return null;
+  const head = raw.trim().slice(0, 2);
+  if (!/^[0-9a-fA-F]{2}$/.test(head)) return null;
+  return Number.parseInt(head, 16);
+}
+
+/** A field the node sends as either a number or a decimal string; absent means `fallback`. */
+function intField(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(num) ? Math.trunc(num) : fallback;
+}
+
+/**
  * One transaction, trimmed to the fields the map draws.
  *
- * The node also returns fromType/toType and the raw senderData/recipientData blobs — a
- * staking transaction's recipientData alone runs to hundreds of bytes, and none of it is
- * rendered, so it is dropped rather than cached 50 rows at a time. A row missing any of
- * hash/from/to/value is not a transaction we can place on the graph: it returns null and
- * the caller drops it.
+ * The raw senderData/recipientData blobs do not survive this: a staking transaction's
+ * recipientData alone runs to hundreds of bytes and would be cached 50 rows at a time.
+ * What the map actually needs from them is one byte each — the op code that says whether
+ * this was a stake, an unstake, a reward payout or a contract call — so that byte is
+ * lifted out as `dataType`/`senderDataType` and the blob is dropped. `fromType`/`toType`
+ * (the @nimiq/core AccountType: 0 basic, 1 vesting, 2 HTLC, 3 staking) and `flags`
+ * (bit 1 = signalling) come through as ints for the same reason.
+ *
+ * A row missing any of hash/from/to/value is not a transaction we can place on the graph:
+ * it returns null and the caller drops it.
  */
 function normalizeTransaction(row) {
   if (!row || typeof row !== 'object') return null;
@@ -1039,6 +1067,11 @@ function normalizeTransaction(row) {
     from: normalizeAddress(from) || from,
     to: normalizeAddress(to) || to,
     value,
+    fromType: intField(row.fromType, 0),
+    toType: intField(row.toType, 0),
+    flags: intField(row.flags, 0),
+    dataType: dataOpCode(row.recipientData),
+    senderDataType: dataOpCode(row.senderData),
   };
   for (const key of ['blockNumber', 'timestamp', 'confirmations', 'size', 'fee']) {
     const raw = row[key];
@@ -1393,7 +1426,7 @@ async function verifyEd25519(publicKey, signature, digest) {
 
 /** The message the client hands to the Hub verbatim. ASCII, so every wallet renders it. */
 function signInMessage(nonce) {
-  return `${SIGN_IN_DOMAIN} ChainMap sign-in\nnonce: ${nonce}`;
+  return `${SIGN_IN_DOMAIN} NimMap sign-in\nnonce: ${nonce}`;
 }
 
 /**

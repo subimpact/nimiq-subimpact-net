@@ -1,6 +1,6 @@
 /**
  * The validators page in two readings: the table, and the delegation map that
- * used to live at /graph/ before ChainMap took that page.
+ * used to live at /graph/ before NimMap took that page.
  *
  * The map is `lazy()`d rather than rendered hidden, so the many readers who only
  * want the table never download the force simulation or the 2,900-node payload

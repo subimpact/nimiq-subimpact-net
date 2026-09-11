@@ -1,5 +1,5 @@
 /**
- * ChainMap pass state: the worker's auth routes, the one token in localStorage,
+ * NimMap pass state: the worker's auth routes, the one token in localStorage,
  * and the React hook the page reads its tier from.
  *
  * There is no account and no session. A `sub` token minted by the worker is the
@@ -14,6 +14,11 @@
 import { useCallback, useEffect, useState } from "react"
 
 export const API_BASE = "https://nimiq-api.subimpact.net"
+/**
+ * Deliberately still the old name. The map was renamed from ChainMap to NimMap;
+ * this key is the only thing standing between a paying reader and signing in
+ * again, so it keeps the string their browser already has.
+ */
 export const TOKEN_KEY = "chainmap.token"
 
 const REQUEST_TIMEOUT_MS = 15000
@@ -201,7 +206,7 @@ export function passExpiryLabel(pass: Pass): string {
 
 export type AuthStatus = "loading" | "anonymous" | "entitled" | "expired"
 
-export interface ChainmapAuth {
+export interface NimmapAuth {
   status: AuthStatus
   pass: Pass | null
   /** What the scan engine and the export buttons gate on. */
@@ -219,7 +224,7 @@ export interface ChainmapAuth {
  * `{entitled: false, reason: 'expired'}` keeps it, because "expired" is the one
  * state where the right prompt is *renew* rather than *connect a wallet*.
  */
-export function useChainmapAuth(): ChainmapAuth {
+export function useNimmapAuth(): NimmapAuth {
   const [status, setStatus] = useState<AuthStatus>("loading")
   const [pass, setPass] = useState<Pass | null>(null)
   const [attempt, setAttempt] = useState(0)
@@ -259,7 +264,7 @@ export function useChainmapAuth(): ChainmapAuth {
         }
         // A network blip must not cost a paying reader their pass: keep the
         // token, fall back to the free tier for this page view.
-        console.debug("chainmap pass check failed", error)
+        console.debug("nimmap pass check failed", error)
         setStatus("anonymous")
       })
 

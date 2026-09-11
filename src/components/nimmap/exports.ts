@@ -6,11 +6,11 @@
 import { compactAddress } from "@/lib/nimiq"
 import type { MapModel } from "./types"
 
-/** chainmap-NQ08ACT8…-2026-09-11 — sortable, and names what it is a map of. */
+/** nimmap-NQ08ACT8…-2026-09-11 — sortable, and names what it is a map of. */
 export function exportFilename(seed: string, extension: string): string {
   const compact = compactAddress(seed)
   const date = new Date().toISOString().slice(0, 10)
-  return `chainmap-${compact.slice(0, 12)}-${date}.${extension}`
+  return `nimmap-${compact.slice(0, 12)}-${date}.${extension}`
 }
 
 function download(blob: Blob, filename: string): void {
