@@ -5,6 +5,10 @@
  * header, so nimiq.subimpact.net cannot call it from the browser. This worker fronts
  * a small whitelist of GET endpoints, adds CORS for known origins, and caches
  * responses for 60s at the edge (300s for /api/graph, which fans out to 50+ calls).
+ *
+ * Everything here runs inside the Workers Free per-invocation budget of 50 units,
+ * where fetch() subrequests and Cache API match/put/delete calls share one quota.
+ * /api/graph is split into parts for that reason — see `delegationGraph`.
  */
 
 const ALLOWED_ORIGINS = [
@@ -22,6 +26,11 @@ const CACHE_TTL = 60;
 // gets a longer TTL and a bounded number of upstream calls in flight.
 const GRAPH_CACHE_TTL = 300;
 const GRAPH_CONCURRENCY = 6;
+// Staker calls per part. A part costs 1 cache match + 1 validators fetch + (part 1
+// only) 1 names fetch + GRAPH_CHUNK staker fetches + 1 cache put — 30 units at most,
+// comfortably inside the 50-unit free budget. 52 validators split into 2 parts today;
+// growth to ~104 validators simply yields 4.
+const GRAPH_CHUNK = 26;
 
 // Display names only; every number in /api/graph comes from NimiqHub.
 const VALIDATOR_NAMES_URL = 'https://validators-api-main.je-cf9.workers.dev/api/v1/validators';
@@ -251,17 +260,6 @@ async function mapWithConcurrency(items, limit, task) {
   return results;
 }
 
-/** `proxy` plus JSON parsing; null when the upstream call failed or the body is not JSON. */
-async function fetchCachedJson(ctx, cacheUrl, upstreamPath) {
-  const response = await proxy(ctx, cacheUrl, upstreamPath);
-  if (!response.ok) return null;
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Display names from the official validators API, keyed by normalized address.
  * Best-effort: any failure yields an empty map and the graph ships without names.
@@ -286,26 +284,64 @@ async function fetchValidatorNames() {
   }
 }
 
+/** Staker list for one validator; `[]` on any failure, so one bad upstream is local. */
+async function fetchStakerList(validatorAddress) {
+  try {
+    return unwrapList(
+      await fetchUpstreamJson(
+        `/getStakersByValidatorAddress/${encodeURIComponent(validatorAddress)}`,
+      ),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `?part=N` — a positive integer, or absent for part 1. Returns null when the value is
+ * present but not a positive integer, which the caller turns into a 400.
+ */
+function parsePart(raw) {
+  if (raw === null) return 1;
+  if (!/^\d+$/.test(raw)) return null;
+  const part = Number(raw);
+  return part >= 1 ? part : null;
+}
+
 /**
  * The delegation graph: every validator as a hub, every staker as a satellite.
  *
- * One /getValidators call plus one staker call per validator with stakers, fanned out
- * `GRAPH_CONCURRENCY` at a time and sharing the `/api/stakers/:address` cache entries.
+ * A full graph needs one staker call per validator — ~50 today, which blows the Free
+ * plan's 50-unit per-invocation budget (fetch() and Cache API calls share it). So the
+ * compose is split: each part carries the FULL validator list but only its own slice of
+ * GRAPH_CHUNK validators' stakers, and the client concatenates the parts. The staker
+ * calls are plain fetches — caching them individually would double their unit cost for
+ * no benefit, since the assembled part is itself cached for GRAPH_CACHE_TTL.
+ *
  * A validator whose staker list fails or comes back empty is still returned — it just
  * contributes no staker rows — so a single bad upstream cannot sink the whole graph.
  */
-async function delegationGraph(ctx, cacheUrl) {
+async function delegationGraph(ctx, url) {
+  const part = parsePart(url.searchParams.get('part'));
+  if (part === null) return jsonResponse({ error: 'invalid part' }, 400);
+
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+  // One canonical key per part, so /api/graph and /api/graph?part=1 share an entry.
+  const cacheKey = new Request(new URL(`/api/graph?part=${part}`, url.origin).toString(), {
+    method: 'GET',
+  });
 
   if (cache) {
     const hit = await cache.match(cacheKey);
     if (hit) return hit;
   }
 
-  const validatorsUrl = new URL('/api/validators', cacheUrl.origin);
-  const payload = await fetchCachedJson(ctx, validatorsUrl, '/getValidators');
-  if (!payload) return jsonResponse({ error: 'upstream' }, 502);
+  let payload;
+  try {
+    payload = await fetchUpstreamJson('/getValidators');
+  } catch {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
 
   const validators = [];
   for (const row of unwrapList(payload)) {
@@ -320,24 +356,25 @@ async function delegationGraph(ctx, cacheUrl) {
 
   if (validators.length === 0) return jsonResponse({ error: 'upstream' }, 502);
 
-  const names = await fetchValidatorNames();
+  // Only validators reporting stakers cost a round trip, so they alone set the split.
+  const fetchable = validators.filter((validator) => validator.numStakers > 0);
+  const count = Math.max(1, Math.ceil(fetchable.length / GRAPH_CHUNK));
+  if (part > count) return jsonResponse({ error: 'invalid part' }, 400);
+
+  const slice = fetchable.slice((part - 1) * GRAPH_CHUNK, part * GRAPH_CHUNK);
+
+  // Names cost a subrequest, so only part 1 pays for them — the client reads the
+  // validator list from part 1 and ignores the unnamed copies the other parts carry.
+  const names = part === 1 ? await fetchValidatorNames() : new Map();
   const totalActiveStake = validators.reduce((sum, validator) => sum + validator.balance, 0);
 
-  const stakerLists = await mapWithConcurrency(validators, GRAPH_CONCURRENCY, async (validator) => {
-    // A validator reporting no stakers has nothing to fetch — skip the round trip.
-    if (validator.numStakers <= 0) return [];
-    const stakersUrl = new URL(`/api/stakers/${encodeURIComponent(validator.address)}`, cacheUrl.origin);
-    const body = await fetchCachedJson(
-      ctx,
-      stakersUrl,
-      `/getStakersByValidatorAddress/${encodeURIComponent(validator.address)}`,
-    );
-    return unwrapList(body);
-  });
+  const stakerLists = await mapWithConcurrency(slice, GRAPH_CONCURRENCY, (validator) =>
+    fetchStakerList(validator.address),
+  );
 
   const stakers = [];
   stakerLists.forEach((list, index) => {
-    const validatorAddress = validators[index].address;
+    const validatorAddress = slice[index].address;
     for (const row of list) {
       const address = normalizeAddress(row && row.address);
       if (!address) continue;
@@ -360,6 +397,7 @@ async function delegationGraph(ctx, cacheUrl) {
       stakers,
       totalActiveStake,
       updatedAt: new Date().toISOString(),
+      part: { index: part, count },
     },
     200,
     cacheControl(GRAPH_CACHE_TTL),

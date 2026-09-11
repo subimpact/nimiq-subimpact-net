@@ -6,6 +6,12 @@ export interface GraphPayload {
   stakers: ApiStaker[]
   totalActiveStake: number
   updatedAt: string
+  /**
+   * The API splits the staker fan-out across parts to stay inside the Workers Free
+   * subrequest budget. Every part carries the full validator list; `stakers` holds only
+   * that part's slice, so the client concatenates parts 1..count before building.
+   */
+  part?: { index: number; count: number }
 }
 
 export interface ApiValidator {

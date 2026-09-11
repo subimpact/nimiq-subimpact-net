@@ -18,7 +18,39 @@ import type { Cluster, GraphModel, GraphNode, GraphPayload } from "@/components/
 
 const API_HOST = "nimiq-api.subimpact.net"
 const GRAPH_URL = `https://${API_HOST}/api/graph`
-const REQUEST_TIMEOUT_MS = 15000
+/** Covers the whole part sequence: part 1, then parts 2..N in parallel. */
+const REQUEST_TIMEOUT_MS = 25000
+/**
+ * Runaway guard on the part count the API reports. 32 parts is ~830 validators, far
+ * past any plausible chain state, so this only ever trips on a malformed response.
+ */
+const MAX_PARTS = 32
+
+async function fetchPart(part: number, signal: AbortSignal): Promise<GraphPayload> {
+  const response = await fetch(`${GRAPH_URL}?part=${part}`, { signal })
+  if (!response.ok) throw new Error(`part ${part}: ${response.status}`)
+  return (await response.json()) as GraphPayload
+}
+
+/**
+ * Part 1 carries the validator list and the part count; parts 2..N add their staker
+ * slices. Any part failing rejects the whole load — a partial map would silently
+ * under-report delegation, which this page must never do.
+ */
+async function fetchGraph(signal: AbortSignal): Promise<GraphPayload> {
+  const first = await fetchPart(1, signal)
+  const reported = first.part?.count ?? 1
+  const count = Number.isInteger(reported) ? Math.min(Math.max(reported, 1), MAX_PARTS) : 1
+  if (count < 2) return first
+
+  const rest = await Promise.all(
+    Array.from({ length: count - 1 }, (_, index) => fetchPart(index + 2, signal)),
+  )
+  return {
+    ...first,
+    stakers: first.stakers.concat(...rest.map((payload) => payload.stakers ?? [])),
+  }
+}
 
 /** Slider stops, in NIM. Stake is steeply skewed, so the steps are logarithmic. */
 const MIN_STAKE_STEPS = [0, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000]
@@ -46,11 +78,7 @@ export function DelegationGraph() {
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
     setStatus("loading")
-    fetch(GRAPH_URL, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(String(response.status))
-        return response.json() as Promise<GraphPayload>
-      })
+    fetchGraph(controller.signal)
       .then((payload) => {
         if (cancelled) return
         if (!Array.isArray(payload?.validators) || payload.validators.length === 0) {

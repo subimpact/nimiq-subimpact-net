@@ -80,6 +80,59 @@ function graphUpstream(opts = {}) {
   };
 }
 
+// --- /api/graph at mainnet scale -------------------------------------------
+//
+// Workers Free allows 50 units per invocation, and fetch() shares that quota with
+// Cache API match/put/delete. Each /api/graph part costs 1 match + 1 put on top of its
+// fetches, so the fetch budget below leaves ample headroom.
+const MAX_FETCHES_PER_PART = 32;
+const GRAPH_CHUNK = 26;
+
+/** Deterministic, unique, regex-valid Nimiq addresses: NQ + 34 base32 chars. */
+function fakeAddress(prefix, index) {
+  const body = `${prefix}${String(index).padStart(3, '0')}`.toUpperCase();
+  return `NQ${(body + 'X'.repeat(34)).slice(0, 34)}`.match(/.{1,4}/g).join(' ');
+}
+
+// 52 validators — today's mainnet count — four of which report no stakers at all.
+const BULK_ZERO_STAKER_INDEXES = new Set([7, 18, 33, 44]);
+const BULK_STAKERS_PER_VALIDATOR = 2;
+const BULK_VALIDATORS = Array.from({ length: 52 }, (_, index) => ({
+  address: fakeAddress('VAL', index),
+  balance: 1000000 * (index + 1),
+  numStakers: BULK_ZERO_STAKER_INDEXES.has(index) ? 0 : BULK_STAKERS_PER_VALIDATOR,
+}));
+/** The validators that actually cost a round trip — the list the worker splits. */
+const BULK_FETCHABLE = BULK_VALIDATORS.filter((validator) => validator.numStakers > 0);
+
+function bulkStakers(index) {
+  return Array.from({ length: BULK_STAKERS_PER_VALIDATOR }, (_, n) => ({
+    address: fakeAddress('STK', index * BULK_STAKERS_PER_VALIDATOR + n),
+    balance: 1000 * (index + 1) + n,
+    delegation: BULK_VALIDATORS[index].address,
+  }));
+}
+
+/** `opts.failAddress` makes that one validator's staker call return 500. */
+function bulkGraphUpstream(opts = {}) {
+  return (url) => {
+    if (url.endsWith('/getValidators')) {
+      return jsonUpstream({ data: BULK_VALIDATORS, metadata: null });
+    }
+    if (url === NAMES_URL) {
+      return jsonUpstream([{ id: 1, name: 'Bulk validator 0', address: BULK_VALIDATORS[0].address }]);
+    }
+    const index = BULK_VALIDATORS.findIndex((validator) => url.endsWith(stakersPath(validator.address)));
+    if (index >= 0) {
+      if (opts.failAddress === BULK_VALIDATORS[index].address) {
+        return new Response('boom', { status: 500 });
+      }
+      return jsonUpstream({ data: bulkStakers(index), metadata: null });
+    }
+    return new Response('not found', { status: 404 });
+  };
+}
+
 /** Records every upstream call; returns a canned JSON body. */
 const upstreamCalls = [];
 let upstreamHandler = () =>
@@ -121,6 +174,13 @@ function call(path, init = {}) {
   return worker.fetch(new Request(`${BASE}${path}`, { ...init, headers }), {}, ctx);
 }
 
+/** One worker invocation, plus how many upstream fetches it made. */
+async function callCounting(path, init = {}) {
+  const before = upstreamCalls.length;
+  const res = await call(path, init);
+  return { res, fetches: upstreamCalls.length - before };
+}
+
 function reset() {
   upstreamCalls.length = 0;
   cacheStore.clear();
@@ -135,9 +195,16 @@ function reset() {
 
 let passed = 0;
 let failed = 0;
+const notes = [];
+
+/** Measurements a test wants in the transcript; printed under its PASS/FAIL line. */
+function note(message) {
+  notes.push(message);
+}
 
 async function test(name, fn) {
   reset();
+  notes.length = 0;
   try {
     await fn();
     passed++;
@@ -147,6 +214,7 @@ async function test(name, fn) {
     console.log(`FAIL  ${name}`);
     console.log(`      ${error.message}`);
   }
+  for (const line of notes) console.log(`      ${line}`);
 }
 
 function assert(condition, message) {
@@ -270,7 +338,7 @@ await test('GET /api/network with a missing counter -> 502', async () => {
   assertEqual((await res.json()).error, 'upstream', 'body.error');
 });
 
-await test('GET /api/graph -> composed validators + stakers', async () => {
+await test('GET /api/graph -> composed validators + stakers, part 1 of 1', async () => {
   upstreamHandler = graphUpstream();
   const res = await call('/api/graph');
   assertEqual(res.status, 200, 'status');
@@ -278,6 +346,8 @@ await test('GET /api/graph -> composed validators + stakers', async () => {
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 
   const body = await res.json();
+  assertEqual(body.part.index, 1, 'part.index');
+  assertEqual(body.part.count, 1, 'part.count (one validator with stakers fits one part)');
   assertEqual(body.validators.length, 2, 'validator count');
   assertEqual(body.totalActiveStake, 400000000, 'totalActiveStake');
   assert(!Number.isNaN(Date.parse(body.updatedAt)), `updatedAt: got ${body.updatedAt}`);
@@ -354,6 +424,147 @@ await test('GET /api/graph is cached (no extra upstream calls on the second requ
   assertEqual(res.status, 200, 'status');
   assertEqual(upstreamCalls.length, before, 'upstream call count');
   assertEqual((await res.json()).totalActiveStake, 400000000, 'cached body');
+});
+
+await test('GET /api/graph?part=N -> 52 validators split into two parts', async () => {
+  upstreamHandler = bulkGraphUpstream();
+  const first = await callCounting('/api/graph?part=1');
+  const second = await callCounting('/api/graph?part=2');
+  assertEqual(first.res.status, 200, 'part 1 status');
+  assertEqual(second.res.status, 200, 'part 2 status');
+
+  const one = await first.res.json();
+  const two = await second.res.json();
+  assertEqual(one.part.index, 1, 'part 1 index');
+  assertEqual(one.part.count, 2, 'part 1 count');
+  assertEqual(two.part.index, 2, 'part 2 index');
+  assertEqual(two.part.count, 2, 'part 2 count');
+
+  // Every part carries the whole validator list; only part 1 pays for the names call.
+  assertEqual(one.validators.length, 52, 'part 1 validator count');
+  assertEqual(two.validators.length, 52, 'part 2 validator count');
+  assertEqual(one.validators[0].name, 'Bulk validator 0', 'part 1 name enrichment');
+  assertEqual(two.validators[0].name, undefined, 'part 2 carries no names');
+  assertEqual(one.totalActiveStake, two.totalActiveStake, 'totalActiveStake across parts');
+  assert(
+    !upstreamCalls.slice(first.fetches).some((c) => c.url === NAMES_URL),
+    'part 2 fetched the validator-names API',
+  );
+
+  // Part 1 takes the first GRAPH_CHUNK validators that report stakers; part 2 the rest.
+  const coveredByOne = new Set(one.stakers.map((s) => s.validatorAddress));
+  const coveredByTwo = new Set(two.stakers.map((s) => s.validatorAddress));
+  assertEqual(coveredByOne.size, GRAPH_CHUNK, 'validators covered by part 1');
+  assertEqual(coveredByTwo.size, BULK_FETCHABLE.length - GRAPH_CHUNK, 'validators covered by part 2');
+  assert(
+    BULK_FETCHABLE.slice(0, GRAPH_CHUNK).every((v) => coveredByOne.has(v.address)),
+    'part 1 missed one of the first 26 validators that report stakers',
+  );
+  assert(
+    BULK_FETCHABLE.slice(GRAPH_CHUNK).every((v) => coveredByTwo.has(v.address)),
+    'part 2 missed one of the remaining validators that report stakers',
+  );
+  assert(
+    ![...coveredByTwo].some((address) => coveredByOne.has(address)),
+    'a validator was fetched by both parts',
+  );
+
+  // Zero-staker validators are listed but never cost a round trip.
+  for (const index of BULK_ZERO_STAKER_INDEXES) {
+    assert(
+      !upstreamCalls.some((c) => c.url.endsWith(stakersPath(BULK_VALIDATORS[index].address))),
+      `fetched stakers for validator ${index}, which reports none`,
+    );
+  }
+
+  const union = [...one.stakers, ...two.stakers];
+  const keys = new Set(union.map((s) => `${s.address}|${s.validatorAddress}`));
+  assertEqual(keys.size, union.length, 'duplicate address+validatorAddress across parts');
+  assertEqual(
+    union.length,
+    BULK_FETCHABLE.length * BULK_STAKERS_PER_VALIDATOR,
+    'union staker count',
+  );
+  note(`stakers: part 1 = ${one.stakers.length}, part 2 = ${two.stakers.length}, union = ${union.length}, duplicates = 0`);
+});
+
+await test('GET /api/graph?part=N stays inside the Workers Free subrequest budget', async () => {
+  upstreamHandler = bulkGraphUpstream();
+  const first = await callCounting('/api/graph?part=1');
+  const second = await callCounting('/api/graph?part=2');
+  note(
+    `upstream fetches per invocation: part 1 = ${first.fetches}, part 2 = ${second.fetches}` +
+      ` (cap ${MAX_FETCHES_PER_PART}; each part also spends 1 cache match + 1 cache put of the 50-unit budget)`,
+  );
+  assert(first.fetches <= MAX_FETCHES_PER_PART, `part 1 made ${first.fetches} fetches`);
+  assert(second.fetches <= MAX_FETCHES_PER_PART, `part 2 made ${second.fetches} fetches`);
+
+  // A cache hit must cost nothing upstream at all.
+  const repeat = await callCounting('/api/graph?part=1');
+  assertEqual(repeat.res.status, 200, 'cached part 1 status');
+  assertEqual(repeat.fetches, 0, 'upstream fetches on a cache hit');
+});
+
+await test('GET /api/graph?part=2 with one staker fetch failing -> 200, fewer stakers', async () => {
+  const failing = BULK_FETCHABLE[GRAPH_CHUNK];
+  upstreamHandler = bulkGraphUpstream({ failAddress: failing.address });
+  const res = await call('/api/graph?part=2');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.validators.length, 52, 'validator count');
+  assertEqual(body.part.count, 2, 'part.count');
+  assertEqual(
+    body.stakers.length,
+    (BULK_FETCHABLE.length - GRAPH_CHUNK - 1) * BULK_STAKERS_PER_VALIDATOR,
+    'staker count (the failed validator contributes none)',
+  );
+  assert(
+    !body.stakers.some((s) => s.validatorAddress === failing.address),
+    'the failed validator still contributed stakers',
+  );
+  assert(
+    body.validators.some((v) => v.address === failing.address),
+    'the failed validator was dropped from the list',
+  );
+});
+
+await test('GET /api/graph with an invalid part -> 400 {"error":"invalid part"}', async () => {
+  upstreamHandler = bulkGraphUpstream();
+  for (const value of ['0', 'abc', '1.5', '-1', '']) {
+    const res = await call(`/api/graph?part=${value}`);
+    assertEqual(res.status, 400, `status for part=${JSON.stringify(value)}`);
+    assertEqual((await res.json()).error, 'invalid part', `body.error for part=${JSON.stringify(value)}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count (rejected before any fetch)');
+
+  // Out of range needs the validator list to know the count, so it costs one fetch.
+  const tooHigh = await call('/api/graph?part=3');
+  assertEqual(tooHigh.status, 400, 'status for part=3 when count=2');
+  assertEqual((await tooHigh.json()).error, 'invalid part', 'body.error for part=3');
+});
+
+await test('GET /api/graph without ?part -> identical to ?part=1', async () => {
+  upstreamHandler = bulkGraphUpstream();
+  const bare = await callCounting('/api/graph');
+  const explicit = await callCounting('/api/graph?part=1');
+  assertEqual(bare.res.status, 200, 'status');
+  assertEqual(explicit.res.status, 200, 'status');
+  // Both normalize to the same cache key, so the second request costs nothing.
+  assertEqual(explicit.fetches, 0, 'upstream fetches for ?part=1 after the bare call');
+  const a = await bare.res.json();
+  const b = await explicit.res.json();
+  assertEqual(JSON.stringify(a), JSON.stringify(b), 'bare /api/graph differs from ?part=1');
+  assertEqual(a.part.index, 1, 'part.index');
+  assertEqual(a.part.count, 2, 'part.count');
+});
+
+await test('GET /api/graph parts are cached independently', async () => {
+  upstreamHandler = bulkGraphUpstream();
+  await call('/api/graph?part=1');
+  const second = await callCounting('/api/graph?part=2');
+  assertEqual(second.res.status, 200, 'status');
+  assert(second.fetches > 0, 'part 2 was wrongly served from the part 1 cache entry');
+  assertEqual((await second.res.json()).part.index, 2, 'part.index');
 });
 
 await test('GET /api/graph survives a missing validator-names API', async () => {
