@@ -4,6 +4,7 @@ import { VALIDATOR_ADDRESS } from '../config';
 import snapshot from '../data/validators.json';
 import { NetworkStats } from '../components/NetworkStats';
 import { LiveStats } from '../components/LiveStats';
+import { CopyAddress } from '../components/CopyAddress';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Card, CardContent } from '../components/ui/card';
@@ -29,7 +30,7 @@ function fmtNim(luna: number): string {
       </p>
       <div class="mt-6 flex flex-wrap gap-3">
         <Button asChild size="lg">
-          <a href="https://www.nimiq.com/staking" target="_blank" rel="noopener">Stake with us</a>
+          <a href="https://www.nimiq.com/staking" target="_blank" rel="noopener" data-stake-cta="hero">Stake with us</a>
         </Button>
         <Button asChild variant="outline" size="lg">
           <a href="/validators/">Compare validators</a>
@@ -153,7 +154,12 @@ function fmtNim(luna: number): string {
           <div class="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p class="text-lg font-semibold">{impact?.name ?? 'ImpactZero stake'}</p>
-              <p class="mt-1 font-mono text-xs text-muted-foreground">{VALIDATOR_ADDRESS}</p>
+              <CopyAddress
+                client:load
+                value={VALIDATOR_ADDRESS}
+                label="ImpactZero validator address"
+                className="mt-1 text-xs text-muted-foreground"
+              />
             </div>
             <Badge variant="outline" class="border-primary/40 text-primary">listed in Nimiq Wallet</Badge>
           </div>
@@ -182,9 +188,9 @@ function fmtNim(luna: number): string {
   <section class="border-t border-border/80">
     <div class="mx-auto max-w-6xl px-4 py-14 text-center">
       <h2 class="text-2xl font-bold tracking-tight">Ready to stake?</h2>
-      <p class="mx-auto mt-2 max-w-[52ch] text-sm text-muted-foreground">Open the Nimiq Wallet, pick ImpactZero stake, and keep 100% of your rewards.</p>
+      <p class="mx-auto mt-2 max-w-[52ch] text-sm text-muted-foreground">Stake right here — connect your account, pick an amount, confirm in the Nimiq Hub, and keep 100% of your rewards.</p>
       <Button asChild size="lg" class="mt-6">
-        <a href="https://www.nimiq.com/staking" target="_blank" rel="noopener">Stake NIM</a>
+        <a href="https://www.nimiq.com/staking" target="_blank" rel="noopener" data-stake-cta="cta">Stake NIM</a>
       </Button>
     </div>
   </section>

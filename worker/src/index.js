@@ -1,10 +1,14 @@
 /**
- * nimiq-api — read-only CORS proxy for NimiqHub REST data.
+ * nimiq-api — CORS proxy for NimiqHub REST data, plus a transaction relay.
  *
  * api.nimiqhub.com serves the data we need but sends no Access-Control-Allow-Origin
  * header, so nimiq.subimpact.net cannot call it from the browser. This worker fronts
  * a small whitelist of GET endpoints, adds CORS for known origins, and caches
  * responses for 60s at the edge (300s for /api/graph, which fans out to 50+ calls).
+ *
+ * The one write path is POST /api/broadcast, which relays an already-signed
+ * transaction to a public Nimiq RPC node — see `broadcastTransaction`. It holds no
+ * keys and signs nothing; the signature is produced in the Nimiq Hub popup.
  *
  * Everything here runs inside the Workers Free per-invocation budget of 50 units,
  * where fetch() subrequests and Cache API match/put/delete calls share one quota.
@@ -21,6 +25,21 @@ const UPSTREAM = 'https://api.nimiqhub.com';
 const USER_AGENT = 'nimiq-api/1.0 (+https://nimiq.subimpact.net)';
 const UPSTREAM_TIMEOUT_MS = 10000;
 const CACHE_TTL = 60;
+
+// Staker state decides which staking transaction the dialog builds, so a stale
+// answer is worse than an extra round trip: a staker cached as "none" would make
+// the client build a create-staker the chain then rejects. Short TTL, enough to
+// blunt a hot loop but not enough to outlive one staking flow.
+const STAKER_CACHE_TTL = 10;
+
+// Public JSON-RPC node used to broadcast signed transactions. Read-only methods
+// come from NimiqHub above; this one exists because NimiqHub has no send route.
+const RPC_URL = 'https://rpc.nimiqwatch.com';
+const RPC_TIMEOUT_MS = 15000;
+// A staking transaction serializes to ~190 bytes (380 hex chars). The ceiling is a
+// sanity bound on request size, not a protocol limit.
+const MAX_TX_HEX_LENGTH = 20000;
+const TX_HEX_RE = /^[0-9a-fA-F]+$/;
 
 // /api/graph composes one validator call plus one staker call per validator, so it
 // gets a longer TTL and a bounded number of upstream calls in flight.
@@ -51,14 +70,28 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
+    const url = new URL(request.url);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const isApi = segments[0] === 'api';
+
+    // The single write route. Checked before the GET-only gate below, and never
+    // cached — an edge cache hit would silently swallow a re-broadcast.
+    if (request.method === 'POST' && isApi && segments.length === 2 && segments[1] === 'broadcast') {
+      // CORS only governs what a browser will let a page read back; it does not stop
+      // a server from posting here. The relay's one legitimate caller is our own
+      // staking dialog, which is cross-origin and so always sends an allowlisted
+      // Origin — anything else is turned away before it can spend a subrequest.
+      if (!origin || !ALLOWED_ORIGINS.includes(origin)) {
+        return withHeaders(jsonResponse({ error: 'forbidden' }, 403), cors);
+      }
+      return withHeaders(await broadcastTransaction(request), cors);
+    }
+
     if (request.method !== 'GET') {
       return withHeaders(jsonResponse({ error: 'method not allowed' }, 405), cors);
     }
 
-    const url = new URL(request.url);
-    const segments = url.pathname.split('/').filter(Boolean);
-
-    if (segments[0] !== 'api') {
+    if (!isApi) {
       return withHeaders(jsonResponse({ error: 'not found' }, 404), cors);
     }
 
@@ -76,6 +109,14 @@ export default {
 
     if (segments.length === 2 && segments[1] === 'graph') {
       return withHeaders(await delegationGraph(ctx, url), cors);
+    }
+
+    if (segments.length === 3 && segments[1] === 'staker') {
+      const address = normalizeAddress(decodeSegment(segments[2]));
+      if (!address) {
+        return withHeaders(jsonResponse({ error: 'invalid address' }, 400), cors);
+      }
+      return withHeaders(await stakerState(ctx, url, address), cors);
     }
 
     if (segments.length === 3 && (segments[1] === 'stakers' || segments[1] === 'account')) {
@@ -101,7 +142,7 @@ function corsHeaders(origin) {
   const headers = { Vary: 'Origin' };
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
-    headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS';
+    headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
     headers['Access-Control-Allow-Headers'] = 'Content-Type';
     headers['Access-Control-Max-Age'] = '86400';
   }
@@ -410,6 +451,161 @@ async function delegationGraph(ctx, url) {
   }
 
   return response;
+}
+
+/**
+ * Staker state for one address — the delegation, and how much is staked.
+ *
+ * NimiqHub has no "not a staker" response: for an address that never staked it
+ * answers 502 with `{"error":"Internal error: No staker with address: NQ…"}`. That
+ * is an expected, meaningful answer for us, so it is normalized to 200
+ * `{"data":null}` and the caller reads "this address is not a staker yet".
+ *
+ * Any other non-2xx stays a 502. The distinction matters: the client picks
+ * create-staker vs add-stake from this answer, and a real outage reported as
+ * `{"data":null}` would have it build a create-staker the chain then rejects.
+ */
+async function stakerState(ctx, url, address) {
+  const cache = globalThis.caches?.default;
+  // Cache under the normalized address so spacing/case variants share one entry.
+  const cacheKey = new Request(
+    new URL(`/api/staker/${encodeURIComponent(address)}`, url.origin).toString(),
+    { method: 'GET' },
+  );
+
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  let upstream;
+  let body;
+  try {
+    upstream = await fetch(`${UPSTREAM}/getStakerByAddress/${encodeURIComponent(address)}`, {
+      method: 'GET',
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    body = await upstream.text();
+  } catch {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  let response;
+  if (upstream.ok) {
+    response = new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        ...cacheControl(STAKER_CACHE_TTL),
+      },
+    });
+  } else if (upstream.status === 404 || /no staker/i.test(body)) {
+    response = jsonResponse({ data: null }, 200, cacheControl(STAKER_CACHE_TTL));
+  } else {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+
+  return response;
+}
+
+/** JSON-RPC results arrive as `{data: value}` from some methods and bare from others. */
+function unwrapRpcResult(result) {
+  const value = result && typeof result === 'object' ? result.data : result;
+  return typeof value === 'string' && value ? value : null;
+}
+
+/**
+ * Relay an already-signed transaction to the RPC node. `{tx: "<hex>"}` in,
+ * `{result: "<hash>"}` out.
+ *
+ * Callers are gated on Origin in `fetch` before this runs, so everything here can
+ * assume the request came from one of ALLOWED_ORIGINS.
+ *
+ * The signature comes from the Nimiq Hub popup in the user's browser; this worker
+ * only forwards bytes, so the worst a malformed body can do is waste one
+ * subrequest. Rejections (bad serialization, insufficient funds, a create-staker
+ * for an address that already stakes) come back from the node with HTTP 200 and an
+ * `error` member — those are the user's problem to see, so the node's own message
+ * is passed through with a 400 rather than flattened into "upstream".
+ */
+async function broadcastTransaction(request) {
+  let raw;
+  try {
+    raw = await request.text();
+  } catch {
+    return jsonResponse({ error: 'invalid body' }, 400);
+  }
+  // Bound the parse: a valid body is one short hex string in a JSON envelope.
+  if (raw.length > MAX_TX_HEX_LENGTH + 1024) {
+    return jsonResponse({ error: 'invalid body' }, 400);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return jsonResponse({ error: 'invalid body' }, 400);
+  }
+
+  const tx = body && typeof body.tx === 'string' ? body.tx.trim() : '';
+  if (
+    tx.length < 2 ||
+    tx.length > MAX_TX_HEX_LENGTH ||
+    tx.length % 2 !== 0 ||
+    !TX_HEX_RE.test(tx)
+  ) {
+    return jsonResponse({ error: 'invalid transaction' }, 400);
+  }
+
+  let upstream;
+  let payload;
+  try {
+    upstream = await fetch(RPC_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': USER_AGENT,
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'sendRawTransaction',
+        params: [tx],
+      }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    });
+    payload = await upstream.json();
+  } catch {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  const rpcError = payload && typeof payload === 'object' ? payload.error : null;
+  if (rpcError) {
+    // `data` carries the useful detail ("Serialization error: …"); `message` is
+    // usually just the generic "Internal error".
+    const detail =
+      typeof rpcError.data === 'string' && rpcError.data
+        ? rpcError.data
+        : typeof rpcError.message === 'string' && rpcError.message
+          ? rpcError.message
+          : 'transaction rejected';
+    return jsonResponse({ error: detail }, 400);
+  }
+
+  const hash = unwrapRpcResult(payload && payload.result);
+  if (!upstream.ok || !hash) {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  return jsonResponse({ result: hash }, 200);
 }
 
 /**

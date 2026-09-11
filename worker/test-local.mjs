@@ -80,6 +80,79 @@ function graphUpstream(opts = {}) {
   };
 }
 
+// --- /api/staker + /api/broadcast fixtures ---------------------------------
+
+const STAKER_ADDRESS = STAKER_A1;
+const STAKER_ADDRESS_ENCODED = encodeURIComponent(STAKER_A1);
+const RPC_URL = 'https://rpc.nimiqwatch.com';
+// 188 hex-encoded bytes — the size a create-staker transaction serializes to.
+const TX_HEX = 'ab'.repeat(188);
+const TX_HASH = '2e4046ff5ca6071e5137f0c492e3de70226322352512a89aa69677e5d0dc07d3';
+
+/**
+ * getStakerByAddress, in the three shapes NimiqHub actually returns:
+ * the staker, a 502 carrying "No staker with address" for an address that never
+ * staked, and a plain failure when the API itself is unwell (`opts.down`).
+ */
+function stakerUpstream(opts = {}) {
+  return (url) => {
+    if (!url.includes('/getStakerByAddress/')) return new Response('not found', { status: 404 });
+    if (opts.missing) {
+      return new Response(
+        JSON.stringify({
+          error: `Internal error: No staker with address: ${STAKER_ADDRESS}`,
+          code: 502,
+        }),
+        { status: 502, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (opts.down) return new Response('service unavailable', { status: 503 });
+    return jsonUpstream({
+      data: {
+        address: STAKER_ADDRESS,
+        balance: 341219403873,
+        delegation: VALIDATOR_A,
+        inactiveBalance: 0,
+        inactiveFrom: null,
+        retiredBalance: 0,
+      },
+      metadata: { blockNumber: 61311359, blockHash: 'abc' },
+    });
+  };
+}
+
+/**
+ * The RPC node's sendRawTransaction replies. It answers HTTP 200 whether the
+ * transaction was accepted or rejected; a rejection is an `error` member whose
+ * `data` holds the detail. `opts.httpFail` stands in for the node being down.
+ */
+function rpcUpstream(opts = {}) {
+  return (url) => {
+    if (url !== RPC_URL) return new Response('not found', { status: 404 });
+    if (opts.httpFail) return new Response('service unavailable', { status: 503 });
+    if (opts.rejection) {
+      return jsonUpstream({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal error', data: opts.rejection },
+        id: 1,
+      });
+    }
+    if (opts.messageOnly) {
+      return jsonUpstream({ jsonrpc: '2.0', error: { code: -32601, message: 'Method not found' }, id: 1 });
+    }
+    if (opts.emptyResult) return jsonUpstream({ jsonrpc: '2.0', result: null, id: 1 });
+    return jsonUpstream({ jsonrpc: '2.0', result: { data: TX_HASH, metadata: null }, id: 1 });
+  };
+}
+
+function postBroadcast(body) {
+  return call('/api/broadcast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
 // --- /api/graph at mainnet scale -------------------------------------------
 //
 // Workers Free allows 50 units per invocation, and fetch() shares that quota with
@@ -168,9 +241,10 @@ const ctx = { waitUntil: (promise) => promise.catch(() => {}) };
 const workerUrl = pathToFileURL(new URL('./src/index.js', import.meta.url).pathname).href;
 const worker = (await import(workerUrl)).default;
 
+/** Sends the allowlisted Origin unless one is given, or `init.omitOrigin` drops it. */
 function call(path, init = {}) {
   const headers = new Headers(init.headers || {});
-  if (!headers.has('Origin')) headers.set('Origin', ORIGIN);
+  if (!init.omitOrigin && !headers.has('Origin')) headers.set('Origin', ORIGIN);
   return worker.fetch(new Request(`${BASE}${path}`, { ...init, headers }), {}, ctx);
 }
 
@@ -234,7 +308,7 @@ await test('OPTIONS preflight -> 204 + CORS headers', async () => {
   const res = await call('/api/validators', { method: 'OPTIONS' });
   assertEqual(res.status, 204, 'status');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
-  assertEqual(res.headers.get('Access-Control-Allow-Methods'), 'GET, OPTIONS', 'ACAM');
+  assertEqual(res.headers.get('Access-Control-Allow-Methods'), 'GET, POST, OPTIONS', 'ACAM');
   assertEqual(res.headers.get('Access-Control-Allow-Headers'), 'Content-Type', 'ACAH');
   assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
 });
@@ -283,6 +357,261 @@ await test('GET /api/account/:address -> getAccountByAddress', async () => {
     `https://api.nimiqhub.com/getAccountByAddress/${EXPECTED_UPSTREAM_ADDRESS}`,
     'upstream URL',
   );
+});
+
+await test('GET /api/staker/:address -> getStakerByAddress with a normalized address', async () => {
+  upstreamHandler = stakerUpstream();
+  const res = await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(
+    upstreamCalls[0].url,
+    `https://api.nimiqhub.com/getStakerByAddress/${encodeURIComponent(STAKER_ADDRESS)}`,
+    'upstream URL',
+  );
+  const body = await res.json();
+  assertEqual(body.data.address, STAKER_ADDRESS, 'data.address');
+  assertEqual(body.data.balance, 341219403873, 'data.balance (luna)');
+  assertEqual(body.data.delegation, VALIDATOR_A, 'data.delegation');
+  assertEqual(body.data.inactiveBalance, 0, 'data.inactiveBalance');
+  assertEqual(body.data.retiredBalance, 0, 'data.retiredBalance');
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=10', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('GET /api/staker/:address (unspaced, lowercase) -> same normalized upstream', async () => {
+  upstreamHandler = stakerUpstream();
+  const res = await call(`/api/staker/${STAKER_ADDRESS.replace(/\s+/g, '').toLowerCase()}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual(
+    upstreamCalls[0].url,
+    `https://api.nimiqhub.com/getStakerByAddress/${encodeURIComponent(STAKER_ADDRESS)}`,
+    'upstream URL',
+  );
+});
+
+await test('GET /api/staker/:address for a non-staker -> 200 {"data":null}', async () => {
+  // NimiqHub reports "not a staker" as a 502 with a message, not as a 404.
+  upstreamHandler = stakerUpstream({ missing: true });
+  const res = await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.data, null, 'data');
+  assertEqual(body.error, undefined, 'body.error (not an error for the client)');
+  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=10', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('GET /api/staker/:address for a 404 upstream -> 200 {"data":null}', async () => {
+  upstreamHandler = () => new Response('not found', { status: 404 });
+  const res = await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual((await res.json()).data, null, 'data');
+});
+
+await test('GET /api/staker/:address with the API down -> 502, never "data":null', async () => {
+  // A real outage must stay an error: reported as `{"data":null}` it would make the
+  // client build a create-staker for an address that already stakes.
+  upstreamHandler = stakerUpstream({ down: true });
+  const res = await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(res.status, 502, 'status');
+  const body = await res.json();
+  assertEqual(body.error, 'upstream', 'body.error');
+  assertEqual('data' in body, false, 'body must not carry a data key');
+});
+
+await test('GET /api/staker/:address with upstream throwing -> 502', async () => {
+  upstreamHandler = () => {
+    throw new Error('timed out');
+  };
+  const res = await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('GET /api/staker/:address is cached, including the not-found answer', async () => {
+  upstreamHandler = stakerUpstream();
+  await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  const cached = await callCounting(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(cached.fetches, 0, 'upstream fetches on a cache hit');
+  assertEqual((await cached.res.json()).data.delegation, VALIDATOR_A, 'cached body');
+
+  reset();
+  upstreamHandler = stakerUpstream({ missing: true });
+  await call(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  const cachedMiss = await callCounting(`/api/staker/${STAKER_ADDRESS_ENCODED}`);
+  assertEqual(cachedMiss.fetches, 0, 'upstream fetches on a cached not-found');
+  assertEqual((await cachedMiss.res.json()).data, null, 'cached not-found body');
+});
+
+await test('GET /api/staker/:address with a bad address -> 400, no upstream call', async () => {
+  const res = await call('/api/staker/NOTANADDRESS');
+  assertEqual(res.status, 400, 'status');
+  assertEqual((await res.json()).error, 'invalid address', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('POST /api/broadcast -> sendRawTransaction, returns the hash', async () => {
+  upstreamHandler = rpcUpstream();
+  const res = await postBroadcast({ tx: TX_HEX });
+  assertEqual(res.status, 200, 'status');
+  assertEqual((await res.json()).result, TX_HASH, 'body.result');
+
+  assertEqual(upstreamCalls.length, 1, 'upstream call count');
+  assertEqual(upstreamCalls[0].url, RPC_URL, 'upstream URL');
+  assertEqual(upstreamCalls[0].init.method, 'POST', 'upstream method');
+  const sent = JSON.parse(upstreamCalls[0].init.body);
+  assertEqual(sent.jsonrpc, '2.0', 'jsonrpc');
+  assertEqual(sent.method, 'sendRawTransaction', 'method');
+  assertEqual(JSON.stringify(sent.params), JSON.stringify([TX_HEX]), 'params');
+  assertEqual(upstreamCalls[0].init.headers['Content-Type'], 'application/json', 'Content-Type');
+
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('POST /api/broadcast accepts a bare string result', async () => {
+  upstreamHandler = () => jsonUpstream({ jsonrpc: '2.0', result: TX_HASH, id: 1 });
+  const res = await postBroadcast({ tx: TX_HEX });
+  assertEqual(res.status, 200, 'status');
+  assertEqual((await res.json()).result, TX_HASH, 'body.result');
+});
+
+await test('POST /api/broadcast is never cached (each call reaches the node)', async () => {
+  upstreamHandler = rpcUpstream();
+  await postBroadcast({ tx: TX_HEX });
+  const again = await callCounting('/api/broadcast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tx: TX_HEX }),
+  });
+  assertEqual(again.res.status, 200, 'status');
+  assertEqual(again.fetches, 1, 'upstream fetches on the second identical broadcast');
+});
+
+await test('POST /api/broadcast from a disallowed origin -> 403, node never called', async () => {
+  // CORS would only hide the response from the page; the relay itself must refuse,
+  // or any server can spend our subrequests on the RPC node.
+  upstreamHandler = rpcUpstream();
+  const res = await call('/api/broadcast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+    body: JSON.stringify({ tx: TX_HEX }),
+  });
+  assertEqual(res.status, 403, 'status');
+  assertEqual((await res.json()).error, 'forbidden', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), null, 'ACAO');
+  assertEqual(res.headers.get('Vary'), 'Origin', 'Vary');
+});
+
+await test('POST /api/broadcast without an Origin header -> 403, node never called', async () => {
+  // curl and every other non-browser caller lands here.
+  upstreamHandler = rpcUpstream();
+  const res = await call('/api/broadcast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tx: TX_HEX }),
+    omitOrigin: true,
+  });
+  assertEqual(res.status, 403, 'status');
+  assertEqual((await res.json()).error, 'forbidden', 'body.error');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), null, 'ACAO');
+});
+
+await test('POST /api/broadcast with an invalid transaction -> 400, no upstream call', async () => {
+  upstreamHandler = rpcUpstream();
+  const bad = [
+    { tx: 'abc' }, // odd length
+    { tx: 'zz' }, // not hex
+    { tx: '' }, // empty
+    { tx: 'a' }, // below the two-character floor
+    { tx: 'ab'.repeat(10001) }, // past MAX_TX_HEX_LENGTH
+    { tx: 123 }, // not a string
+    {}, // no tx at all
+    { tx: null },
+  ];
+  for (const body of bad) {
+    const res = await postBroadcast(body);
+    assertEqual(res.status, 400, `status for ${JSON.stringify(body).slice(0, 40)}`);
+    assertEqual(
+      (await res.json()).error,
+      'invalid transaction',
+      `body.error for ${JSON.stringify(body).slice(0, 40)}`,
+    );
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('POST /api/broadcast with an unparseable body -> 400 invalid body', async () => {
+  upstreamHandler = rpcUpstream();
+  for (const raw of ['not json', '', '{"tx":']) {
+    const res = await postBroadcast(raw);
+    assertEqual(res.status, 400, `status for ${JSON.stringify(raw)}`);
+    assertEqual((await res.json()).error, 'invalid body', `body.error for ${JSON.stringify(raw)}`);
+  }
+  // An oversized body is rejected before it is parsed.
+  const huge = await postBroadcast(`{"tx":"${'a'.repeat(40000)}"}`);
+  assertEqual(huge.status, 400, 'status for an oversized body');
+  assertEqual((await huge.json()).error, 'invalid body', 'body.error for an oversized body');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test("POST /api/broadcast passes the node's rejection through -> 400", async () => {
+  upstreamHandler = rpcUpstream({
+    rejection: 'Serialization error: Hit the end of buffer, expected more data',
+  });
+  const res = await postBroadcast({ tx: TX_HEX });
+  assertEqual(res.status, 400, 'status');
+  assertEqual(
+    (await res.json()).error,
+    'Serialization error: Hit the end of buffer, expected more data',
+    'body.error (the node message, verbatim)',
+  );
+  assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+});
+
+await test('POST /api/broadcast falls back to the RPC message when there is no detail', async () => {
+  upstreamHandler = rpcUpstream({ messageOnly: true });
+  const res = await postBroadcast({ tx: TX_HEX });
+  assertEqual(res.status, 400, 'status');
+  assertEqual((await res.json()).error, 'Method not found', 'body.error');
+});
+
+await test('POST /api/broadcast with the node unreachable -> 502', async () => {
+  upstreamHandler = () => {
+    throw new Error('connection refused');
+  };
+  const res = await postBroadcast({ tx: TX_HEX });
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
+await test('POST /api/broadcast with a non-JSON or resultless node reply -> 502', async () => {
+  upstreamHandler = rpcUpstream({ httpFail: true });
+  const failed = await postBroadcast({ tx: TX_HEX });
+  assertEqual(failed.status, 502, 'status for an HTTP failure');
+  assertEqual((await failed.json()).error, 'upstream', 'body.error');
+
+  reset();
+  upstreamHandler = rpcUpstream({ emptyResult: true });
+  const empty = await postBroadcast({ tx: TX_HEX });
+  assertEqual(empty.status, 502, 'status for a null result');
+  assertEqual((await empty.json()).error, 'upstream', 'body.error');
+});
+
+await test('POST to any other route -> 405', async () => {
+  for (const path of ['/api/staker/NQ27', '/api/network', '/api/nope']) {
+    const res = await call(path, { method: 'POST' });
+    assertEqual(res.status, 405, `status for ${path}`);
+  }
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
+});
+
+await test('GET /api/broadcast -> 404 (the route is POST only)', async () => {
+  const res = await call('/api/broadcast');
+  assertEqual(res.status, 404, 'status');
+  assertEqual(upstreamCalls.length, 0, 'upstream call count');
 });
 
 await test('GET /api/validators -> getValidators', async () => {
