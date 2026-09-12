@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { ExpandableAddress } from "@/components/explorer/ExpandableAddress"
 
 export interface Validator {
   id: number
@@ -179,7 +180,7 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
                           )}
                         </p>
                         <p className="font-mono text-[11px] text-muted-foreground">
-                          {v.address.slice(0, 14)}...
+                          <ExpandableAddress address={v.address} />
                         </p>
                       </div>
                     </div>

@@ -392,6 +392,11 @@ function corsHeaders(origin) {
   return headers;
 }
 
+/**
+ * Cache-Control for the copy a route stores in the Worker Cache API (the TTL that governs
+ * how long `cache.match` can serve it). The client-facing response is rewritten to
+ * `no-store` by `withHeaders` — browsers and the CDN must never hold these payloads.
+ */
 function cacheControl(ttl = CACHE_TTL) {
   return { 'Cache-Control': `public, max-age=${ttl}` };
 }
@@ -411,6 +416,13 @@ function jsonResponse(body, status, extraHeaders) {
 function withHeaders(response, headers) {
   const merged = new Headers(response.headers);
   for (const [key, value] of Object.entries(headers)) merged.set(key, value);
+  // Client-facing API responses are never storable by a browser or the CDN. This zone
+  // runs `cache_level: aggressive` with `browser_cache_ttl: 14400`, so any cacheable
+  // response that the CDN stores gets its browser TTL rewritten to 4 hours — which parked
+  // long-polling clients on a frozen payload for the rest of the day. The Worker Cache
+  // API is a separate layer: routes `put` their own copies (they keep the max-age from
+  // `cacheControl`) and only this wrapper decides what the network sees.
+  merged.set('Cache-Control', 'no-store');
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

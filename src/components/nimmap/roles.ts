@@ -21,7 +21,7 @@ let validatorsPromise: Promise<Set<string>> | null = null
 let paywallPromise: Promise<string | null> | null = null
 
 export function loadValidatorAddresses(): Promise<Set<string>> {
-  validatorsPromise ??= fetch(`${API_BASE}/api/validators`)
+  validatorsPromise ??= fetch(`${API_BASE}/api/validators`, { cache: "no-store" })
     .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
     .then((payload: { data?: ValidatorRow[] }) => {
       const rows = Array.isArray(payload?.data) ? payload.data : []
@@ -38,7 +38,7 @@ export function loadValidatorAddresses(): Promise<Set<string>> {
 
 /** The pass address, straight from the price quote — never hardcoded here. */
 export function loadPaywallAddress(): Promise<string | null> {
-  paywallPromise ??= fetch(`${API_BASE}/api/quote`)
+  paywallPromise ??= fetch(`${API_BASE}/api/quote`, { cache: "no-store" })
     .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
     .then((payload: { paywallAddress?: string }) => payload?.paywallAddress ?? null)
     .catch((error) => {
@@ -120,7 +120,9 @@ export function useBalance(address: string | null): number | null | undefined {
     }
     let cancelled = false
     setBalance(undefined)
-    fetch(`${API_BASE}/api/account/${encodeURIComponent(compactAddress(address))}`)
+    fetch(`${API_BASE}/api/account/${encodeURIComponent(compactAddress(address))}`, {
+      cache: "no-store",
+    })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
       .then((payload: { data?: { balance?: number } | null }) => {
         if (cancelled) return

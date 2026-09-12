@@ -6,12 +6,12 @@ import {
   exactTime,
   formatNim,
   getJson,
-  shortAddress,
   shortHash,
   timeAgo,
   txKind,
   txKindLabel,
 } from "./format"
+import { ExpandableAddressPair } from "./ExpandableAddress"
 import type { ExplorerBlock, ExplorerTx } from "./types"
 
 type State = "loading" | "ready" | "missing" | "error"
@@ -42,8 +42,8 @@ function TxRow({ tx }: { tx: ExplorerTx }) {
       >
         {shortHash(tx.hash, 10, 6)}
       </a>
-      <span className="hidden min-w-0 flex-1 truncate font-mono text-muted-foreground sm:inline">
-        {shortAddress(tx.from)} → {shortAddress(tx.to)}
+      <span className="hidden min-w-0 flex-1 font-mono text-muted-foreground sm:inline">
+        <ExpandableAddressPair from={tx.from} to={tx.to} />
       </span>
       <span className="ml-auto shrink-0 font-mono tabular-nums text-foreground">
         {formatNim(tx.value)} NIM

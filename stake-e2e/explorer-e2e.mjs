@@ -100,6 +100,9 @@ assert(blockText.includes('Hash') && blockText.includes('Producer') && blockText
 assert(await page.locator('[data-explorer-tx]').count() === 2, 'block detail: both transactions listed');
 const detailTxHref = await page.locator('[data-explorer-tx]').first().getAttribute('href');
 assert(detailTxHref === `/explorer/tx/${TX1}`, `block detail: tx rows link to /explorer/tx/<hash> (got ${detailTxHref})`);
+const pair = page.locator('[data-explorer-address-pair]').first();
+await pair.click();
+assert((await pair.innerText()).includes(ALICE), 'block detail: clicking an address pair reveals the exact addresses');
 
 // — tx detail —
 await page.goto(BASE + `/explorer/tx/?id=${TX1}`, { waitUntil: 'domcontentloaded' });

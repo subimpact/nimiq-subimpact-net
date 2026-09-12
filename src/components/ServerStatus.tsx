@@ -88,7 +88,7 @@ async function getStatus(): Promise<StatusPayload> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
-    const res = await fetch(`${API_BASE}/api/status`, { signal: ctrl.signal })
+    const res = await fetch(`${API_BASE}/api/status`, { signal: ctrl.signal, cache: "no-store" })
     if (!res.ok) throw new Error(String(res.status))
     return (await res.json()) as StatusPayload
   } finally {

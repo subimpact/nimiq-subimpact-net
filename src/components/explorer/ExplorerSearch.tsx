@@ -21,7 +21,9 @@ export function ExplorerSearch() {
     if (!query || state === "busy") return
     setState("busy")
     try {
-      const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}`)
+      const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}`, {
+        cache: "no-store",
+      })
       if (res.status === 404) {
         setState("none")
         return

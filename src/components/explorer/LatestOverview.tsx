@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { EDGE_COLORS } from "@/components/nimmap/txKinds"
 import { compactAddress } from "@/lib/nimiq"
+import { ExpandableAddressPair } from "./ExpandableAddress"
 import { formatNim, getJson, shortAddress, shortHash, timeAgo, txKind, txKindLabel } from "./format"
 import type { BlocksPayload, ExplorerBlock, ExplorerTx } from "./types"
 
@@ -154,8 +155,8 @@ export function LatestOverview() {
                   >
                     {shortHash(tx.hash, 8, 5)}
                   </a>
-                  <span className="hidden min-w-0 flex-1 truncate font-mono text-muted-foreground sm:inline">
-                    {shortAddress(tx.from)} → {shortAddress(tx.to)}
+                  <span className="hidden min-w-0 flex-1 font-mono text-muted-foreground sm:inline">
+                    <ExpandableAddressPair from={tx.from} to={tx.to} />
                   </span>
                   <span className="ml-auto shrink-0 font-mono tabular-nums text-foreground">
                     {formatNim(tx.value)} NIM

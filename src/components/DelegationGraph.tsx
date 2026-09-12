@@ -27,7 +27,7 @@ const REQUEST_TIMEOUT_MS = 25000
 const MAX_PARTS = 32
 
 async function fetchPart(part: number, signal: AbortSignal): Promise<GraphPayload> {
-  const response = await fetch(`${GRAPH_URL}?part=${part}`, { signal })
+  const response = await fetch(`${GRAPH_URL}?part=${part}`, { signal, cache: "no-store" })
   if (!response.ok) throw new Error(`part ${part}: ${response.status}`)
   return (await response.json()) as GraphPayload
 }

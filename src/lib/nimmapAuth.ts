@@ -84,7 +84,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`, { ...init, signal: controller.signal })
+    response = await fetch(`${API_BASE}${path}`, { ...init, signal: controller.signal, cache: "no-store" })
   } finally {
     clearTimeout(timer)
   }

@@ -732,7 +732,7 @@ await test('GET /api/stakers/:address -> upstream called with normalized address
     'nimiq-api/1.0 (+https://nimiq.subimpact.net)',
     'User-Agent',
   );
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
 });
 
 await test('GET /api/stakers/:address (unspaced, lowercase) -> same normalized upstream', async () => {
@@ -770,7 +770,7 @@ await test('GET /api/staker/:address -> getStakerByAddress with a normalized add
   assertEqual(body.data.delegation, VALIDATOR_A, 'data.delegation');
   assertEqual(body.data.inactiveBalance, 0, 'data.inactiveBalance');
   assertEqual(body.data.retiredBalance, 0, 'data.retiredBalance');
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=10', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 });
 
@@ -793,7 +793,7 @@ await test('GET /api/staker/:address for a non-staker -> 200 {"data":null}', asy
   const body = await res.json();
   assertEqual(body.data, null, 'data');
   assertEqual(body.error, undefined, 'body.error (not an error for the client)');
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=10', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 });
 
@@ -1034,7 +1034,7 @@ await test('GET /api/network -> normalized counters + epoch math', async () => {
   assertEqual(body.epoch.batchInEpoch, 104, 'epoch.batchInEpoch');
   assertEqual(body.epoch.batchesRemaining, 616, 'epoch.batchesRemaining');
   assertEqual(body.epoch.approxSecondsRemaining, 36960, 'epoch.approxSecondsRemaining');
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 });
 
@@ -1045,6 +1045,22 @@ await test('GET /api/network is cached (three upstream calls for two requests)',
   assertEqual(res.status, 200, 'status');
   assertEqual(upstreamCalls.length, 3, 'upstream call count');
   assertEqual((await res.json()).epochNumber, 1340, 'cached body');
+});
+
+await test('Caching layers: client responses are no-store, the Worker cache keeps its TTL', async () => {
+  // The zone (cache_level aggressive + browser_cache_ttl 14400) rewrites cacheable
+  // responses' browser TTL to four hours, which froze polling clients on stale payloads.
+  // The contract now is: nothing the client sees is storable, and the Cache API copy —
+  // the only cache — keeps the route's max-age.
+  upstreamHandler = networkUpstream;
+  const first = await call('/api/network');
+  assertEqual(first.headers.get('Cache-Control'), 'no-store', 'client header on a fresh fetch');
+  const stored = cacheStore.get(`${BASE}/api/network`);
+  assert(stored instanceof Response, 'a copy is stored in the Worker Cache API');
+  assertEqual(stored.headers.get('Cache-Control'), 'public, max-age=60', 'stored copy keeps its TTL');
+  const second = await call('/api/network');
+  assertEqual(second.headers.get('Cache-Control'), 'no-store', 'client header on a cache hit');
+  assertEqual(upstreamCalls.length, 3, 'the hit made no upstream calls');
 });
 
 await test('GET /api/network with one upstream failing -> 502', async () => {
@@ -1067,7 +1083,7 @@ await test('GET /api/graph -> composed validators + stakers, part 1 of 1', async
   upstreamHandler = graphUpstream();
   const res = await call('/api/graph');
   assertEqual(res.status, 200, 'status');
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=300', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 
   const body = await res.json();
@@ -1425,7 +1441,7 @@ await test('GET /api/history/:address -> normalized page, nextStartAt on a full 
   });
   const res = await call(`/api/history/${ADDRESS_ENCODED}?max=2`);
   assertEqual(res.status, 200, 'status');
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
 
   assertEqual(upstreamCalls.length, 1, 'upstream call count');
@@ -1679,7 +1695,7 @@ await test('GET /api/quote -> $29.99 priced in luna at the CoinGecko rate', asyn
   assertEqual(body.paywallAddress, PAYWALL_ADDRESS, 'paywallAddress');
   assertEqual(body.validMinutes, 60, 'validMinutes');
   assert(!Number.isNaN(Date.parse(body.generatedAt)), `generatedAt: got ${body.generatedAt}`);
-  assertEqual(res.headers.get('Cache-Control'), 'public, max-age=60', 'Cache-Control');
+  assertEqual(res.headers.get('Cache-Control'), 'no-store', 'Cache-Control');
   assertEqual(res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
   note(`$${body.usdTarget} at $${body.priceUsd}/NIM = ${body.nimAmount} NIM = ${body.lunaAmount} luna`);
 });

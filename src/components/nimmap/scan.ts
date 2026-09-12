@@ -77,7 +77,7 @@ export async function fetchHistoryPage(
   try {
     const response = await fetch(
       `${API_BASE}/api/history/${encodeURIComponent(compactAddress(address))}?max=${max}`,
-      { signal: controller.signal },
+      { signal: controller.signal, cache: "no-store" },
     )
     if (!response.ok) throw new Error(`history ${response.status}`)
     return (await response.json()) as HistoryPage
