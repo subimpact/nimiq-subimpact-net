@@ -93,3 +93,16 @@ export function pathSegment(): string {
   const parts = window.location.pathname.split("/").filter(Boolean)
   return decodeURIComponent(parts[parts.length - 1] ?? "")
 }
+
+/**
+ * The id a detail page renders: the trailing path segment, or — when the shell
+ * is opened bare (local preview, which cannot rewrite pretty URLs) — `?id=`.
+ */
+export function detailId(): string {
+  const seg = pathSegment()
+  if (seg && seg !== "block" && seg !== "tx" && seg !== "explorer" && !seg.endsWith(".html")) {
+    return seg
+  }
+  if (typeof window === "undefined") return ""
+  return new URLSearchParams(window.location.search).get("id") ?? ""
+}

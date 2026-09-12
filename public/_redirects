@@ -1,7 +1,6 @@
-# Explorer detail pages are client-rendered from the id in the path — a static build
-# cannot enumerate a chain, so every /explorer/block/<id> and /explorer/tx/<hash>
-# serves the page shell (a 200 rewrite keeps the pretty URL). The shell reads the id
-# back out of the pathname and fetches the record from the API worker.
-
-/explorer/block/*  /explorer/block/index.html  200
-/explorer/tx/*     /explorer/tx/index.html     200
+# Explorer detail pages are client-rendered from the id in the path: serve the
+# page shell for any id, keeping the pretty URL (200 proxy, no redirect).
+/explorer/block/:id /explorer/block/ 200
+/explorer/tx/:hash /explorer/tx/ 200
+/explorer/block/* /explorer/block/ 200
+/explorer/tx/* /explorer/tx/ 200

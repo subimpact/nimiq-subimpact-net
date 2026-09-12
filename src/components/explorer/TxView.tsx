@@ -2,10 +2,10 @@ import { useEffect, useState } from "react"
 import { EDGE_COLORS } from "@/components/nimmap/txKinds"
 import { compactAddress } from "@/lib/nimiq"
 import {
+  detailId,
   exactTime,
   formatNim,
   getJson,
-  pathSegment,
   timeAgo,
   txKind,
   txKindLabel,
@@ -43,7 +43,7 @@ function AddressLink({ address }: { address: string }) {
 
 /** One transaction, fetched by the hash the URL carries. */
 export function TxView() {
-  const [hash] = useState(() => pathSegment())
+  const [hash] = useState(() => detailId())
   const [tx, setTx] = useState<ExplorerTx | null>(null)
   const [state, setState] = useState<State>("loading")
 

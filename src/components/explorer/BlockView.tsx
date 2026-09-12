@@ -2,10 +2,10 @@ import { useEffect, useState } from "react"
 import { EDGE_COLORS } from "@/components/nimmap/txKinds"
 import { compactAddress } from "@/lib/nimiq"
 import {
+  detailId,
   exactTime,
   formatNim,
   getJson,
-  pathSegment,
   shortAddress,
   shortHash,
   timeAgo,
@@ -54,7 +54,7 @@ function TxRow({ tx }: { tx: ExplorerTx }) {
 
 /** One block, fetched by the height or hash the URL carries. */
 export function BlockView() {
-  const [id] = useState(() => pathSegment())
+  const [id] = useState(() => detailId())
   const [block, setBlock] = useState<ExplorerBlock | null>(null)
   const [state, setState] = useState<State>("loading")
 
