@@ -313,6 +313,10 @@ export function PaywallDialog({
               Sign in with the wallet you will pay from. The Hub opens in a small window and asks
               you to pick an account — no keys, no email, and nothing is sent yet.
             </p>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Delegating to ImpactZero? The pass is free while your stake stands — sign in with
+              the wallet you delegate from and it unlocks.
+            </p>
             {error && <ErrorBox message={error} />}
             {notice && (
               <p className="text-xs text-muted-foreground" role="status">
