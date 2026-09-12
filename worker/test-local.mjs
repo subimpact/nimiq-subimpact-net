@@ -121,7 +121,7 @@ function stakerUpstream(opts = {}) {
       data: {
         address: STAKER_ADDRESS,
         balance: 341219403873,
-        delegation: VALIDATOR_A,
+        delegation: opts.delegation ?? VALIDATOR_A,
         inactiveBalance: 0,
         inactiveFrom: null,
         retiredBalance: 0,
@@ -2864,12 +2864,14 @@ await test('comp: GET /api/me with a comped pass token -> active, comp, no upstr
 
 // --- NimMap staker access ---------------------------------------------------
 //
-// Stakers of the configured validator hold a pass while the delegation exists —
-// re-checked at every sign-in, windowed to 30 days. Unlike the comp list this rests on
-// one upstream call (the NimiqHub staker record), and that call failing must fall
-// through to the ordinary price/payment path, never grant.
+// Stakers of the configured validator hold a pass while — and only while — the
+// delegation exists: re-verified against the chain at every sign-in and on every
+// /api/me, with the receipt rolled forward each time. The moment the stake is gone the
+// wallet is back on the free tier. Unlike the comp list this rests on one upstream call
+// (the NimiqHub staker record); at sign-in a failed call falls through to the ordinary
+// price/payment path, at /api/me it lands the wallet on free — never a grant.
 
-const STAKER_PASS_MS = 30 * DAY_MS;
+const STAKER_PASS_MS = 7 * DAY_MS;
 
 /** The bindings plus the staker validator (and optionally a stake floor), var-style. */
 function stakerEnv(validator, minLuna) {
@@ -2905,21 +2907,75 @@ await test('staker: a wallet staking with the configured validator signs in -> e
   const [kind] = payload.split(':');
   assertEqual(kind, 'staker', 'pass token kind');
   const horizon = body.paidUntil - Date.now();
-  assert(horizon > STAKER_PASS_MS - 5000 && horizon <= STAKER_PASS_MS, `30-day window: got ${horizon}ms`);
+  assert(horizon > STAKER_PASS_MS - 5000 && horizon <= STAKER_PASS_MS, `7-day window: got ${horizon}ms`);
 });
 
-await test('staker: GET /api/me with a staker pass token -> active, staker, no upstream call', async () => {
+await test('staker: GET /api/me re-verifies the stake and rolls the receipt -> active', async () => {
   const wallet = makeWallet();
+  upstreamHandler = stakerUpstream();
   const token = mintTestToken('staker', wallet.addressCompact, Date.now() + STAKER_PASS_MS);
 
   const res = await callCounting('/api/me', { headers: { Authorization: `Bearer ${token}` } });
   assertEqual(res.res.status, 200, 'status');
-  assertEqual(res.fetches, 0, 'upstream fetches');
+  assertEqual(res.fetches, 1, 'upstream fetches (the stake is re-read, not trusted from the token)');
 
   const body = await res.res.json();
   assertEqual(body.entitled, true, 'entitled');
   assertEqual(body.staker, true, 'staker');
   assertEqual(body.address, wallet.address, 'address (re-spaced from the token)');
+
+  // The receipt rolls forward: same kind, fresh expiry.
+  assert(typeof body.token === 'string' && body.token !== token, 'a fresh receipt');
+  const [payload] = Buffer.from(body.token, 'base64url').toString().split('.');
+  assertEqual(payload.split(':')[0], 'staker', 'fresh receipt kind');
+  const horizon = body.paidUntil - Date.now();
+  assert(horizon > STAKER_PASS_MS - 5000 && horizon <= STAKER_PASS_MS, `rolled forward: got ${horizon}ms`);
+});
+
+await test('staker: GET /api/me once the stake is gone -> not_staked, no grant, no fresh receipt', async () => {
+  const wallet = makeWallet();
+  // A record that delegates somewhere else — the stake left our validator.
+  upstreamHandler = stakerUpstream({ delegation: PAYWALL_COMPACT });
+  const token = mintTestToken('staker', wallet.addressCompact, Date.now() + STAKER_PASS_MS);
+
+  const res = await callCounting('/api/me', { headers: { Authorization: `Bearer ${token}` } });
+  assertEqual(res.res.status, 200, 'status');
+  assertEqual(res.fetches, 1, 'upstream fetches');
+
+  const body = await res.res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'not_staked', 'reason');
+  assertEqual(body.token, undefined, 'no fresh receipt');
+  assertEqual(body.staker, undefined, 'no staker flag');
+});
+
+await test('staker: GET /api/me when the stake cannot be read -> not_staked, never a grant', async () => {
+  const wallet = makeWallet();
+  upstreamHandler = deadUpstream();
+  const token = mintTestToken('staker', wallet.addressCompact, Date.now() + STAKER_PASS_MS);
+
+  const res = await callCounting('/api/me', { headers: { Authorization: `Bearer ${token}` } });
+  assertEqual(res.res.status, 200, 'status');
+
+  const body = await res.res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'not_staked', 'reason');
+});
+
+await test('staker: a comped wallet holding a staker receipt stays entitled without a chain read', async () => {
+  const wallet = makeWallet();
+  const token = mintTestToken('staker', wallet.addressCompact, Date.now() + STAKER_PASS_MS);
+
+  const res = await callCounting('/api/me', {
+    headers: { Authorization: `Bearer ${token}` },
+    env: compEnv(wallet.addressCompact),
+  });
+  assertEqual(res.res.status, 200, 'status');
+  assertEqual(res.fetches, 0, 'upstream fetches');
+
+  const body = await res.res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.comp, true, 'comp');
 });
 
 await test('staker: a wallet staking with a different validator is unchanged -> no_payment', async () => {

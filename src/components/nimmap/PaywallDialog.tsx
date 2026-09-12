@@ -475,7 +475,7 @@ export function PaywallDialog({
                     {pass.comp
                       ? "Never"
                       : pass.staker
-                        ? "Renews while staked"
+                        ? "While staked"
                         : new Date(pass.paidUntil).toLocaleDateString("en-US", {
                           year: "numeric",
                           month: "short",

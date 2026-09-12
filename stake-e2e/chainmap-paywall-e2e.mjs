@@ -531,9 +531,9 @@ async function signIn(page) {
         entitled: true,
         staker: true,
         address: WALLET,
-        paidUntil: Date.now() + 30 * DAY,
-        daysLeft: 30,
-        expiresInMs: 30 * DAY,
+        paidUntil: Date.now() + 7 * DAY,
+        daysLeft: 7,
+        expiresInMs: 7 * DAY,
       },
     },
     token: 'staker-token-staker',
@@ -567,9 +567,31 @@ async function signIn(page) {
     'the manage dialog names the pass rather than counting days',
   )
   assert(
-    (await dialog.innerText()).includes('Renews while staked'),
-    'the manage dialog says the staker pass renews while staked',
+    (await dialog.innerText()).includes('While staked'),
+    'the manage dialog says the staker pass runs while staked',
   )
+  await context.close()
+}
+
+// ===========================================================================
+// 9. A receipt whose stake is gone — back on the free tier, receipt kept
+// ===========================================================================
+{
+  // What /api/me answers once the wallet no longer delegates to our validator:
+  // not entitled, and deliberately not "expired". The client must show the plain
+  // free tier — no renew nag — and keep the receipt so re-staking restores the pass.
+  const { context, page } = await openMap({
+    worker: { me: { entitled: false, reason: 'not_staked', address: WALLET } },
+    token: 'staker-token-unstaked',
+  })
+
+  const badge = page.locator('[data-nimmap-tier="free"]')
+  await badge.waitFor({ timeout: 15000 })
+  const badgeText = (await badge.innerText()).replace(/\s+/g, ' ')
+  assert(badgeText.includes('Free'), `an unstaked receipt lands on the free tier (got "${badgeText}")`)
+
+  const stored = await page.evaluate(() => window.localStorage.getItem('chainmap.token'))
+  assert(stored === 'staker-token-unstaked', 'the receipt is kept, not destroyed')
   await context.close()
 }
 

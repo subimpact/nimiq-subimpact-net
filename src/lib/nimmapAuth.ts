@@ -4,8 +4,9 @@
  *
  * There is no account and no session. A `sub` token minted by the worker is the
  * whole of the client's state — it carries the address and the expiry inside a
- * payload the worker signed, so `/api/me` can re-check a pass without a popup,
- * a database, or a request to the chain.
+ * payload the worker signed, so `/api/me` can re-check a pass without a popup or
+ * a database. A `staker` pass is the one exception: the stake, not the clock, is
+ * what bounds it, so the worker re-reads the chain on every check.
  *
  * Nothing here imports @nimiq/hub-api: the wallet popup lives in PaywallDialog,
  * which is lazily loaded, so a reader who never signs in never downloads it.
@@ -36,8 +37,9 @@ export interface Pass {
    */
   comp: boolean
   /**
-   * A pass minted by staking with the operator's validator. Same tier as a paid pass;
-   * its window renews at every sign-in for as long as the stake exists.
+   * A pass verified against the chain on every visit: it exists exactly while the
+   * wallet stakes with the operator's validator. The receipt rolls forward on each
+   * check, and the moment the stake is gone the wallet is back on the free tier.
    */
   staker: boolean
 }
@@ -206,11 +208,11 @@ export function passFrom(payload: EntitlementResponse, fallbackAddress?: string)
 /**
  * What the pass has left, in words. A comped pass has a real expiry — a century out —
  * but printing "36,500 days left" would be noise, so it says what it is instead. A
- * staker pass counts a real 30-day window that renews at every sign-in, so it says that.
+ * staker pass is bounded by the stake rather than the clock, so it says that.
  */
 export function passExpiryLabel(pass: Pass): string {
   if (pass.comp) return "no expiry"
-  if (pass.staker) return "renews while staked"
+  if (pass.staker) return "checked live while you stake"
   return `${pass.daysLeft} day${pass.daysLeft === 1 ? "" : "s"} left`
 }
 
@@ -251,20 +253,24 @@ export function useNimmapAuth(): NimmapAuth {
       .then((payload) => {
         if (cancelled) return
         if (payload.entitled && typeof payload.paidUntil === "number") {
+          // A staker check rolls its receipt forward — keep the freshest one.
+          if (payload.token && payload.token !== token) writeStoredToken(payload.token)
           setPass({
             address: payload.address ?? "",
             paidUntil: payload.paidUntil,
             daysLeft: payload.daysLeft ?? 0,
-            token,
+            token: payload.token ?? token,
             comp: payload.comp === true,
             staker: payload.staker === true,
           })
           setStatus("entitled")
           return
         }
-        // Genuine token, spent pass: keep it so the dialog can say "renew".
+        // Genuine token, spent pass: keep it so the dialog can say "renew". A stake
+        // that is gone is not "expired" — it is simply the free tier again, and the
+        // kept receipt brings the pass straight back if the stake returns.
         setPass(null)
-        setStatus("expired")
+        setStatus(payload.reason === "expired" ? "expired" : "anonymous")
       })
       .catch((error: unknown) => {
         if (cancelled) return

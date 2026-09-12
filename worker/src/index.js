@@ -203,10 +203,12 @@ const STAKER_VALIDATOR = 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY';
 // millisecond timestamp that a token can carry and a date can render.
 const COMP_PASS_MS = 100 * 365 * DAY_MS;
 
-// How long a staker's pass runs before the wallet has to sign in again and the stake is
-// re-checked. The perk renews while the delegation exists, so this window is really a
-// re-check cadence: unstake, and the pass lapses within one window of it.
-const STAKER_PASS_MS = 30 * DAY_MS;
+// How long a staker's receipt stays usable between check-ins. This is not an access
+// window: /api/me re-verifies the stake against the chain on every visit and rolls the
+// receipt forward each time, so access lasts exactly as long as the delegation does.
+// The moment the stake is gone, the next check lands the wallet back on the free tier —
+// a receipt that outlives the stake grants nothing.
+const STAKER_PASS_MS = 7 * DAY_MS;
 
 // A pass runs 30 days from the timestamp of the payment transaction, not from when
 // the user first asks about it — the chain records when they paid.
@@ -1080,8 +1082,9 @@ function stakerMinLuna(env) {
 /**
  * Is `address` staking with our validator? One NimiqHub call answers it: the staker
  * record's `delegation` names the validator the stake sits under. Returns the granted
- * pass, or null for everyone else — including upstream trouble, which deliberately falls
- * through to the price/payment path rather than granting anything on a guess.
+ * pass, or null — for everyone else, for a stake that is gone, and for upstream
+ * trouble alike. Callers decide what null means: sign-in reads it as "not a staker,
+ * try the paid path", /api/me as "no verified stake, back to the free tier".
  */
 async function stakerGrant(address, env) {
   const validator = stakerValidator(env);
@@ -1651,11 +1654,11 @@ async function signPayload(payload, secret) {
  * The bearer tokens: base64url("<kind>:<address>:<expiry>.<hmac>").
  *
  * All three kinds are receipts, not sessions. A `sub` token says "the chain showed this
- * address paid until this instant"; a `staker` token is the same receipt minted through
- * the stake-unlock path, kept as its own kind only so /api/me can label the pass without
- * a chain read; an `auth` token says "this address proved it holds its key at this
- * instant". Nothing is stored server-side, so a lost token costs the user one round trip
- * and a stolen one expires on its own.
+ * address paid until this instant"; a `staker` token is a receipt that must be
+ * re-verified against the chain on every /api/me — the stake, not the clock, is what
+ * bounds it, and its kind is what tells /api/me to make that read; an `auth` token says
+ * "this address proved it holds its key at this instant". Nothing is stored server-side,
+ * so a lost token costs the user one round trip and a stolen one expires on its own.
  *
  * The kind is inside the signed payload rather than alongside it, because it is exactly
  * the thing an attacker would want to change: without it, the hour-long proof-of-key
@@ -2144,6 +2147,31 @@ async function currentEntitlement(request, env) {
 
   if (Date.now() >= claims.expiresAt) {
     return jsonResponse({ entitled: false, reason: 'expired' }, 200);
+  }
+
+  // A `staker` token proves a sign-in, not an ongoing stake: the perk lives and dies
+  // with the delegation, so every visit re-reads the chain before anything is granted.
+  // The receipt rolls forward while the stake stands; the moment it stops being
+  // verifiable the wallet is back on the free tier — and keeps the receipt, so
+  // re-staking brings the pass straight back, no sign-in needed.
+  if (claims.kind === 'staker' && !isCompAddress(claims.addressCompact, env)) {
+    const live = await stakerGrant(claims.addressCompact, env);
+    if (!live) {
+      return jsonResponse(
+        { entitled: false, reason: 'not_staked', address: normalizeAddress(claims.addressCompact) },
+        200,
+      );
+    }
+    return jsonResponse(
+      {
+        entitled: true,
+        address: normalizeAddress(claims.addressCompact),
+        staker: true,
+        token: await mintToken('staker', claims.addressCompact, live.paidUntil, secret),
+        ...entitlementWindow(live.paidUntil),
+      },
+      200,
+    );
   }
 
   return jsonResponse(
