@@ -16,6 +16,15 @@ PAYWALL_ADDRESS = "NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC"
 # Granting and revoking is editing this line and redeploying; there is nothing else to undo.
 COMP_ADDRESSES = "NQ27NCB13CYU9P4LEM2VD7L228QE36PAEXB1"
 
+# Stakers of this validator hold the NimMap pass free while the delegation exists. The
+# stake is re-checked at every sign-in; the minted pass is windowed to 30 days, so a
+# former staker lapses within one window of unstaking. Public like the entries above.
+STAKER_ACCESS_VALIDATOR = "NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY"
+
+# Optional floor, in luna, on the stake that earns the pass (0 = any stake counts; the
+# protocol minimum delegation is 100 NIM).
+STAKER_MIN_LUNA = "0"
+
 # CHAINMAP_TOKEN_SECRET signs the pass tokens and is deliberately absent here — set it
 # once per environment with `npx wrangler secret put CHAINMAP_TOKEN_SECRET`. Without it
 # /api/entitlement and /api/me answer 500; rotating it invalidates every issued token,

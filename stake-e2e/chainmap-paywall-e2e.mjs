@@ -519,6 +519,60 @@ async function signIn(page) {
   await context.close()
 }
 
+// ===========================================================================
+// 8. A staker pass — full access for wallets staking with the operator's validator
+// ===========================================================================
+{
+  // What /api/me answers for a staker: an ordinary paid pass for as long as the stake
+  // stands, flagged so the client labels it instead of counting days.
+  const { context, page } = await openMap({
+    worker: {
+      me: {
+        entitled: true,
+        staker: true,
+        address: WALLET,
+        paidUntil: Date.now() + 30 * DAY,
+        daysLeft: 30,
+        expiresInMs: 30 * DAY,
+      },
+    },
+    token: 'staker-token-staker',
+  })
+
+  const badge = page.locator('[data-nimmap-tier="paid"]')
+  await badge.waitFor({ timeout: 15000 })
+  const badgeText = (await badge.innerText()).replace(/\s+/g, ' ')
+  assert(
+    badgeText.includes('Staker pass') && badgeText.includes('while staked'),
+    `a staker pass is badged as a staker pass, not a countdown (got "${badgeText}")`,
+  )
+  assert(
+    !badgeText.includes('days left') && !badgeText.includes('Owner'),
+    'the staker badge neither counts days nor claims an owner pass',
+  )
+  assert(
+    (await page.locator('[data-nimmap-paywall]').count()) === 0,
+    'the paywall never opens itself for a staker wallet',
+  )
+  assert(
+    (await page.locator('[data-nimmap-depth="6"]').getAttribute('data-locked')) === null,
+    'a staker pass is the paid tier: depth 6 is unlocked',
+  )
+
+  await badge.click()
+  const dialog = page.locator('[data-nimmap-paywall]')
+  await dialog.waitFor({ state: 'visible', timeout: 15000 })
+  assert(
+    (await dialog.locator('[data-nimmap-days-left]').innerText()).trim() === 'Staker',
+    'the manage dialog names the pass rather than counting days',
+  )
+  assert(
+    (await dialog.innerText()).includes('Renews while staked'),
+    'the manage dialog says the staker pass renews while staked',
+  )
+  await context.close()
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 await browser.close()
 process.exit(failed > 0 ? 1 : 0)

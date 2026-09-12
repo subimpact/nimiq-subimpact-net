@@ -168,8 +168,8 @@ export function PaywallDialog({
       if (granted) {
         onEntitled(granted)
         setStep("done")
-        // A comped pass would otherwise report 36,500 days and skew every average.
-        track("nimmap_unlock_success", granted.comp ? { comp: true } : { daysLeft: granted.daysLeft })
+        // A comped or staker pass would otherwise report nonsense and skew every average.
+        track("nimmap_unlock_success", granted.comp ? { comp: true } : granted.staker ? { staker: true } : { daysLeft: granted.daysLeft })
         return true
       }
 
@@ -433,7 +433,7 @@ export function PaywallDialog({
                 <CheckIcon className="size-4" />
               </span>
               <p className="text-sm font-semibold">
-                {pass.comp ? "Your owner pass is active" : "Your pass is active"} —{" "}
+                {pass.comp ? "Your owner pass is active" : pass.staker ? "Your staker pass is active" : "Your pass is active"} —{" "}
                 {passExpiryLabel(pass)}.
               </p>
             </div>
@@ -460,9 +460,9 @@ export function PaywallDialog({
               </CopyAddress>
               <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <div>
-                  <dt className="text-muted-foreground">{pass.comp ? "Pass" : "Days left"}</dt>
+                  <dt className="text-muted-foreground">{pass.comp || pass.staker ? "Pass" : "Days left"}</dt>
                   <dd className="font-mono tabular-nums text-foreground" data-nimmap-days-left="">
-                    {pass.comp ? "Owner" : pass.daysLeft}
+                    {pass.comp ? "Owner" : pass.staker ? "Staker" : pass.daysLeft}
                   </dd>
                 </div>
                 <div>
@@ -470,7 +470,9 @@ export function PaywallDialog({
                   <dd className="font-mono text-[11px] tabular-nums text-foreground">
                     {pass.comp
                       ? "Never"
-                      : new Date(pass.paidUntil).toLocaleDateString("en-US", {
+                      : pass.staker
+                        ? "Renews while staked"
+                        : new Date(pass.paidUntil).toLocaleDateString("en-US", {
                           year: "numeric",
                           month: "short",
                           day: "numeric",

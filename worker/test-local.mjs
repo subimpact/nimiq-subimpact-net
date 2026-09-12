@@ -1063,6 +1063,44 @@ await test('Caching layers: client responses are no-store, the Worker cache keep
   assertEqual(upstreamCalls.length, 3, 'the hit made no upstream calls');
 });
 
+await test('GET /api/active-validators -> compact set, cached, client no-store', async () => {
+  upstreamHandler = (url, init) => {
+    const req = JSON.parse(init.body || '{}');
+    if (req.method === 'getActiveValidators') {
+      return jsonUpstream({
+        result: {
+          data: [
+            { address: 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY' },
+            { address: 'NQ05 U1RF QJNH JCS1 RDQX 4M3Y 60KR K6CN 5LKC' },
+          ],
+        },
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  const first = await callCounting('/api/active-validators');
+  assertEqual(first.res.status, 200, 'status');
+  assertEqual(first.fetches, 1, 'upstream fetches');
+  const body = await first.res.json();
+  assertEqual(body.count, 2, 'count');
+  assertEqual(body.addresses[0], 'NQ08ACT8T0FEPTG8P5RLH2S3QGXHV15RNVXY', 'address compacted');
+  assertEqual(body.addresses[1], 'NQ05U1RFQJNHJCS1RDQX4M3Y60KRK6CN5LKC', 'address compacted (2)');
+  assertEqual(first.res.headers.get('Cache-Control'), 'no-store', 'client header');
+  assertEqual(first.res.headers.get('Access-Control-Allow-Origin'), ORIGIN, 'ACAO');
+
+  const second = await callCounting('/api/active-validators');
+  assertEqual(second.fetches, 0, 'second call served from the Worker cache');
+  assertEqual((await second.res.json()).count, 2, 'cached body');
+});
+
+await test('GET /api/active-validators with a dead RPC -> 502', async () => {
+  upstreamHandler = deadUpstream();
+  const res = await call('/api/active-validators');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'body.error');
+});
+
 await test('GET /api/network with one upstream failing -> 502', async () => {
   upstreamHandler = (url) =>
     url.endsWith('/getBatchNumber') ? new Response('boom', { status: 500 }) : networkUpstream(url);
@@ -2359,10 +2397,11 @@ await test('payment search: a payment on page 3 is found, paging by startAt', as
   assertEqual(body.paidUntil, RECENT_PAYMENT_MS + 30 * DAY_MS, 'paidUntil');
 
   // Three history pages, each cursored on the last hash of the page before it, plus the
-  // price call — and it stops at page 3 rather than reading the rest of the history.
+  // price call and the staker-record check — and it stops at page 3 rather than reading
+  // the rest of the history.
   const calls = historyCalls();
   assertEqual(calls.length, 3, 'history pages fetched');
-  assertEqual(res.fetches, 4, 'upstream fetches (3 pages + 1 price)');
+  assertEqual(res.fetches, 5, 'upstream fetches (3 pages + 1 price + 1 staker record)');
   assertEqual(calls[0][2], null, 'page 1 startAt');
   assertEqual(calls[1][2], pageHash(0, 199), 'page 2 startAt (last hash of page 1)');
   assertEqual(calls[2][2], pageHash(1, 199), 'page 3 startAt (last hash of page 2)');
@@ -2390,7 +2429,7 @@ await test('payment search: a payment past 5 pages -> no_payment, and the walk s
   assertEqual(body.entitled, false, 'entitled');
   assertEqual(body.reason, 'no_payment', 'reason');
   assertEqual(historyCalls().length, 5, 'history pages fetched (capped at 5)');
-  assertEqual(res.fetches, 6, 'upstream fetches (5 pages + 1 price)');
+  assertEqual(res.fetches, 7, 'upstream fetches (5 pages + 1 price + 1 staker record)');
   note('scan depth = 5 pages x 200 tx = the last 1000 transactions, <= 6 subrequests');
 });
 
@@ -2539,7 +2578,7 @@ await test('POST /api/entitlement is never cached (each call re-reads the chain)
     headers: { Authorization: `Bearer ${token}` },
   });
   assertEqual(again.res.status, 200, 'status');
-  assertEqual(again.fetches, 2, 'upstream fetches on the second identical check (price + history)');
+  assertEqual(again.fetches, 3, 'upstream fetches on the second identical check (staker record + price + history)');
   assertEqual((await again.res.json()).entitled, true, 'entitled');
 });
 
@@ -2821,6 +2860,103 @@ await test('comp: GET /api/me with a comped pass token -> active, comp, no upstr
   const after = await revoked.json();
   assertEqual(after.entitled, true, 'entitled after revocation (the token still stands)');
   assertEqual(after.comp, undefined, 'comp after revocation');
+});
+
+// --- NimMap staker access ---------------------------------------------------
+//
+// Stakers of the configured validator hold a pass while the delegation exists —
+// re-checked at every sign-in, windowed to 30 days. Unlike the comp list this rests on
+// one upstream call (the NimiqHub staker record), and that call failing must fall
+// through to the ordinary price/payment path, never grant.
+
+const STAKER_PASS_MS = 30 * DAY_MS;
+
+/** The bindings plus the staker validator (and optionally a stake floor), var-style. */
+function stakerEnv(validator, minLuna) {
+  return {
+    ...ENV,
+    STAKER_ACCESS_VALIDATOR: validator,
+    ...(minLuna !== undefined ? { STAKER_MIN_LUNA: String(minLuna) } : {}),
+  };
+}
+
+await test('staker: a wallet staking with the configured validator signs in -> entitled, one upstream call', async () => {
+  const wallet = makeWallet();
+  upstreamHandler = stakerUpstream();
+
+  const res = await signIn(wallet, {}, { env: stakerEnv(VALIDATOR_A) });
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.staker, true, 'staker');
+  assertEqual(body.comp, undefined, 'comp (absent for a staker)');
+  assertEqual(body.requiredLuna, undefined, 'requiredLuna (a staker pass is unpriced)');
+  assertEqual(body.priceUsd, undefined, 'priceUsd (a staker pass is unpriced)');
+
+  // The one call is the staker record; no price feed, no history walk.
+  assertEqual(upstreamCalls.length, 1, 'upstream call count');
+  assert(upstreamCalls[0].url.includes('/getStakerByAddress/'), `the call is getStakerByAddress: ${upstreamCalls[0].url}`);
+  assertEqual(priceCalls().length, 0, 'price source calls');
+  assertEqual(historyCalls().length, 0, 'getTransactionsByAddress calls');
+
+  // The pass token carries the `staker` kind, and the window is 30 days.
+  const [payload] = Buffer.from(body.token, 'base64url').toString().split('.');
+  const [kind] = payload.split(':');
+  assertEqual(kind, 'staker', 'pass token kind');
+  const horizon = body.paidUntil - Date.now();
+  assert(horizon > STAKER_PASS_MS - 5000 && horizon <= STAKER_PASS_MS, `30-day window: got ${horizon}ms`);
+});
+
+await test('staker: GET /api/me with a staker pass token -> active, staker, no upstream call', async () => {
+  const wallet = makeWallet();
+  const token = mintTestToken('staker', wallet.addressCompact, Date.now() + STAKER_PASS_MS);
+
+  const res = await callCounting('/api/me', { headers: { Authorization: `Bearer ${token}` } });
+  assertEqual(res.res.status, 200, 'status');
+  assertEqual(res.fetches, 0, 'upstream fetches');
+
+  const body = await res.res.json();
+  assertEqual(body.entitled, true, 'entitled');
+  assertEqual(body.staker, true, 'staker');
+  assertEqual(body.address, wallet.address, 'address (re-spaced from the token)');
+});
+
+await test('staker: a wallet staking with a different validator is unchanged -> no_payment', async () => {
+  const wallet = makeWallet();
+  const other = makeWallet();
+  upstreamHandler = (url, init) =>
+    String(url).includes('/getStakerByAddress/')
+      ? stakerUpstream()(url, init)
+      : paywallUpstream({ txs: [txFixture({ from: other.address })] })(url, init);
+
+  const res = await signIn(wallet, {}, { env: stakerEnv(PAYWALL_COMPACT) });
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.staker, undefined, 'staker (absent for another validator)');
+  assertEqual(body.reason, 'no_payment', 'reason');
+  assertEqual(priceCalls().length, 1, 'price source calls (the ordinary path ran)');
+  assertEqual(historyCalls().length, 1, 'getTransactionsByAddress calls');
+});
+
+await test('staker: under the optional STAKER_MIN_LUNA floor -> no_payment', async () => {
+  const wallet = makeWallet();
+  const other = makeWallet();
+  upstreamHandler = (url, init) =>
+    String(url).includes('/getStakerByAddress/')
+      ? stakerUpstream()(url, init)
+      : paywallUpstream({ txs: [txFixture({ from: other.address })] })(url, init);
+
+  // The fixture staker holds ~3.4M NIM (341,219,403,873 luna); a floor of 1e18 luna
+  // sits above it, so the delegation matches but the stake does not clear the bar.
+  const res = await signIn(wallet, {}, { env: stakerEnv(VALIDATOR_A, 1e18) });
+  assertEqual(res.status, 200, 'status');
+
+  const body = await res.json();
+  assertEqual(body.entitled, false, 'entitled');
+  assertEqual(body.reason, 'no_payment', 'reason');
 });
 
 await test('bad address -> 400 {"error":"invalid address"}', async () => {

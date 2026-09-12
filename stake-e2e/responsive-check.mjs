@@ -95,6 +95,17 @@ await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   if (url.includes('/api/status')) {
     return route.fulfill({ status: 200, contentType: 'application/json', body: STATUS_BODY });
   }
+  if (url.includes('/api/active-validators')) {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        addresses: VALIDATORS.slice(0, 11).map((v) => v.address.replace(/\s+/g, '').toUpperCase()),
+        count: 11,
+        fetchedAt: Date.now(),
+      }),
+    });
+  }
   if (url.includes('/api/blocks')) {
     return route.fulfill({
       status: 200,
@@ -398,6 +409,16 @@ for (const path of ['/', '/validators/']) {
     `${path}: the linked token is the API host (got ${JSON.stringify(text)})`,
   );
 }
+
+// The elected chips: one per row, fed by the chain's active set plus the score signal.
+// Eleven validators are in the mocked active set; the twelfth must read Inactive even
+// though its mock score alone would read Elected.
+await page.setViewportSize({ width: 1440, height: 900 });
+await page.goto(BASE + '/validators/', { waitUntil: 'load' });
+await page.locator('[data-elected-chip="inactive"]').waitFor({ timeout: 10000 });
+assert((await page.locator('[data-elected-chip]').count()) === 12, 'every listed validator carries a status chip');
+assert((await page.locator('[data-elected-chip="elected"]').count()) === 11, 'validators in the active set read Elected');
+assert((await page.locator('[data-elected-chip="inactive"]').count()) === 1, 'a validator outside the active set reads Inactive');
 
 // Shell width on desktop: the wide shells actually take the screen.
 await page.setViewportSize({ width: 1920, height: 1080 });

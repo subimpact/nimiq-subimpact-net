@@ -303,6 +303,7 @@ export function NimMap() {
               expired={auth.status === "expired"}
               daysLeft={auth.pass?.daysLeft ?? 0}
               comp={auth.pass?.comp ?? false}
+              staker={auth.pass?.staker ?? false}
               address={auth.pass?.address ?? null}
               onClick={() => openPaywall(tier === "paid" ? "manage" : "unlock")}
             />
@@ -503,6 +504,7 @@ function TierBadge({
   expired,
   daysLeft,
   comp,
+  staker,
   address,
   onClick,
 }: {
@@ -511,6 +513,8 @@ function TierBadge({
   daysLeft: number
   /** An operator-granted pass: same tier, but there is no countdown to show. */
   comp: boolean
+  /** A pass earned by staking: renews at each sign-in, so it also shows no countdown. */
+  staker: boolean
   address: string | null
   onClick: () => void
 }) {
@@ -535,8 +539,10 @@ function TierBadge({
         </>
       ) : tier === "paid" ? (
         <>
-          <span className="font-semibold">{comp ? "Owner pass" : "Pass"}</span>
-          {comp ? (
+          <span className="font-semibold">{staker ? "Staker pass" : comp ? "Owner pass" : "Pass"}</span>
+          {staker ? (
+            <span>while staked</span>
+          ) : comp ? (
             <span>no expiry</span>
           ) : (
             <span className="font-mono tabular-nums">

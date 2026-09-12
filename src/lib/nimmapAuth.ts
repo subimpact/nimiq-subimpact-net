@@ -35,6 +35,11 @@ export interface Pass {
    * its `paidUntil` is a century out, so it is labelled rather than counted down.
    */
   comp: boolean
+  /**
+   * A pass minted by staking with the operator's validator. Same tier as a paid pass;
+   * its window renews at every sign-in for as long as the stake exists.
+   */
+  staker: boolean
 }
 
 export interface NonceResponse {
@@ -55,6 +60,8 @@ export interface EntitlementResponse {
   authToken?: string
   /** Present, and true, only for a comped wallet; a paid pass omits it entirely. */
   comp?: boolean
+  /** Present, and true, only for a pass minted through staking. */
+  staker?: boolean
   requiredLuna?: number
   priceUsd?: number
   paywallAddress?: string
@@ -192,15 +199,18 @@ export function passFrom(payload: EntitlementResponse, fallbackAddress?: string)
         : Math.max(0, Math.ceil((payload.paidUntil - Date.now()) / 86400000)),
     token: payload.token,
     comp: payload.comp === true,
+    staker: payload.staker === true,
   }
 }
 
 /**
  * What the pass has left, in words. A comped pass has a real expiry — a century out —
- * but printing "36,500 days left" would be noise, so it says what it is instead.
+ * but printing "36,500 days left" would be noise, so it says what it is instead. A
+ * staker pass counts a real 30-day window that renews at every sign-in, so it says that.
  */
 export function passExpiryLabel(pass: Pass): string {
   if (pass.comp) return "no expiry"
+  if (pass.staker) return "renews while staked"
   return `${pass.daysLeft} day${pass.daysLeft === 1 ? "" : "s"} left`
 }
 
@@ -247,6 +257,7 @@ export function useNimmapAuth(): NimmapAuth {
             daysLeft: payload.daysLeft ?? 0,
             token,
             comp: payload.comp === true,
+            staker: payload.staker === true,
           })
           setStatus("entitled")
           return

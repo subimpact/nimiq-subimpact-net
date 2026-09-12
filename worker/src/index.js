@@ -192,11 +192,21 @@ const QUOTE_VALID_MINUTES = 60;
 // staging deploy can point elsewhere; the constant is the production answer.
 const PAYWALL_ADDRESS = 'NQ70 SM7L 2PKV 7D55 SUUA B80X 1DML 5XS1 XHJC';
 
+// Stakers of this validator hold a pass while the delegation exists — the perk that
+// gives people a reason to delegate to us. Editable per environment via
+// STAKER_ACCESS_VALIDATOR (see wrangler.toml); public like the paywall address.
+const STAKER_VALIDATOR = 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY';
+
 // How long a comped pass runs. It is a real expiry rather than a null, so the comp
 // case travels through the same token, the same claims and the same client code as a
 // paid one — a century out is "never" for every purpose here, and still an ordinary
 // millisecond timestamp that a token can carry and a date can render.
 const COMP_PASS_MS = 100 * 365 * DAY_MS;
+
+// How long a staker's pass runs before the wallet has to sign in again and the stake is
+// re-checked. The perk renews while the delegation exists, so this window is really a
+// re-check cadence: unstake, and the pass lapses within one window of it.
+const STAKER_PASS_MS = 30 * DAY_MS;
 
 // A pass runs 30 days from the timestamp of the payment transaction, not from when
 // the user first asks about it — the chain records when they paid.
@@ -244,7 +254,7 @@ const NONCE_TTL_MS = 10 * 60 * 1000;
 // session; `auth` only says "this wallet proved it holds the key", and is short because
 // its whole job is to let the client re-ask the chain without signing again.
 const AUTH_TOKEN_TTL_MS = 60 * 60 * 1000;
-const TOKEN_KINDS = new Set(['sub', 'auth']);
+const TOKEN_KINDS = new Set(['sub', 'staker', 'auth']);
 
 // A sign-in body is four short strings; bound the parse like /api/broadcast.
 const MAX_AUTH_BODY = 1024;
@@ -315,6 +325,10 @@ export default {
 
     if (segments.length === 2 && segments[1] === 'status') {
       return withHeaders(await nodeStatus(ctx, url), cors);
+    }
+
+    if (segments.length === 2 && segments[1] === 'active-validators') {
+      return withHeaders(await activeValidatorSet(ctx, url), cors);
     }
 
     if (segments.length === 2 && segments[1] === 'quote') {
@@ -478,6 +492,43 @@ function unwrapNumber(payload, key) {
   const value = raw && typeof raw === 'object' ? raw.data : raw;
   const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   return Number.isFinite(num) ? Math.trunc(num) : null;
+}
+
+/**
+ * The chain's currently active validator set (`getActiveValidators`): the registered
+ * validators eligible for slot selection — inactive, jailed and retired ones are absent.
+ * The validators page cross-references this so a listed pool missing from the set reads
+ * as inactive rather than merely "not elected". One RPC call, edge-cached like the rest.
+ */
+async function activeValidatorSet(ctx, cacheUrl) {
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(new URL('/api/active-validators', cacheUrl.origin).toString(), {
+    method: 'GET',
+  });
+
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  const result = await rpcCall('getActiveValidators', []);
+  if (!result.ok || !Array.isArray(result.data)) {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  const addresses = result.data.map((row) => compactAddress(row && row.address)).filter(Boolean);
+  const response = jsonResponse(
+    { addresses, count: addresses.length, fetchedAt: Date.now() },
+    200,
+    cacheControl(),
+  );
+
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+  return response;
 }
 
 /**
@@ -1008,6 +1059,59 @@ function compAddresses(env) {
 function isCompAddress(address, env) {
   const compact = compactAddress(address);
   return compact !== '' && compAddresses(env).has(compact);
+}
+
+/**
+ * The validator whose stakers hold a pass (STAKER_ACCESS_VALIDATOR, defaulting to ours),
+ * and the optional floor on the stake that earns it (STAKER_MIN_LUNA, luna; 0 = any).
+ * Same contract as the comp list: public, var-editable, and it grants nothing until a
+ * wallet proves the key behind its address.
+ */
+function stakerValidator(env) {
+  return compactAddress(env && env.STAKER_ACCESS_VALIDATOR) || compactAddress(STAKER_VALIDATOR);
+}
+
+function stakerMinLuna(env) {
+  const raw = env && env.STAKER_MIN_LUNA;
+  const value = typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * Is `address` staking with our validator? One NimiqHub call answers it: the staker
+ * record's `delegation` names the validator the stake sits under. Returns the granted
+ * pass, or null for everyone else — including upstream trouble, which deliberately falls
+ * through to the price/payment path rather than granting anything on a guess.
+ */
+async function stakerGrant(address, env) {
+  const validator = stakerValidator(env);
+  if (!validator) return null;
+
+  let response;
+  try {
+    response = await fetch(`${UPSTREAM}/getStakerByAddress/${encodeURIComponent(address)}`, {
+      method: 'GET',
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+
+  let data;
+  try {
+    data = (await response.json()).data;
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== 'object') return null;
+  if (compactAddress(data.delegation) !== validator) return null;
+
+  const staked = typeof data.balance === 'number' ? data.balance : 0;
+  if (staked < stakerMinLuna(env)) return null;
+
+  return { status: 'paid', staker: true, paidUntil: Date.now() + STAKER_PASS_MS };
 }
 
 /**
@@ -1546,10 +1650,12 @@ async function signPayload(payload, secret) {
 /**
  * The bearer tokens: base64url("<kind>:<address>:<expiry>.<hmac>").
  *
- * Both kinds are receipts, not sessions. A `sub` token says "the chain showed this
- * address paid until this instant"; an `auth` token says "this address proved it holds
- * its key at this instant". Nothing is stored server-side, so a lost token costs the user
- * one round trip and a stolen one expires on its own.
+ * All three kinds are receipts, not sessions. A `sub` token says "the chain showed this
+ * address paid until this instant"; a `staker` token is the same receipt minted through
+ * the stake-unlock path, kept as its own kind only so /api/me can label the pass without
+ * a chain read; an `auth` token says "this address proved it holds its key at this
+ * instant". Nothing is stored server-side, so a lost token costs the user one round trip
+ * and a stolen one expires on its own.
  *
  * The kind is inside the signed payload rather than alongside it, because it is exactly
  * the thing an attacker would want to change: without it, the hour-long proof-of-key
@@ -1818,6 +1924,12 @@ async function resolveEntitlement(address, env) {
     return { status: 'paid', comp: true, paidUntil: Date.now() + COMP_PASS_MS };
   }
 
+  // Then stakers of our own validator. Also before the price feed — a staker's pass
+  // should not depend on CoinGecko's mood either — but unlike a comp it costs one
+  // upstream call (the staker record), so it is checked second.
+  const staked = await stakerGrant(address, env);
+  if (staked) return staked;
+
   const priceUsd = await fetchNimPriceUsd();
   if (priceUsd === null) return { status: 'upstream' };
 
@@ -1935,14 +2047,17 @@ async function verifySignIn(request, env) {
       entitled: true,
       address,
       ...entitlementWindow(entitlement.paidUntil),
-      token: await mintToken('sub', addressCompact, entitlement.paidUntil, secret),
+      token: await mintToken(entitlement.staker ? 'staker' : 'sub', addressCompact, entitlement.paidUntil, secret),
       authToken,
       // A comp pass was never priced, so it quotes no price: `comp` stands where
       // requiredLuna and priceUsd would be, and the client shows no expiry rather than
-      // the century this pass nominally runs for.
+      // the century this pass nominally runs for. A staker pass is unpriced too, and
+      // says `staker` in the same slot.
       ...(entitlement.comp
         ? { comp: true }
-        : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
+        : entitlement.staker
+          ? { staker: true }
+          : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
     },
     200,
   );
@@ -1992,10 +2107,12 @@ async function checkEntitlement(request, env) {
       entitled: true,
       address,
       ...entitlementWindow(entitlement.paidUntil),
-      token: await mintToken('sub', claims.addressCompact, entitlement.paidUntil, secret),
+      token: await mintToken(entitlement.staker ? 'staker' : 'sub', claims.addressCompact, entitlement.paidUntil, secret),
       ...(entitlement.comp
         ? { comp: true }
-        : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
+        : entitlement.staker
+          ? { staker: true }
+          : { requiredLuna: entitlement.requiredLuna, priceUsd: entitlement.priceUsd }),
     },
     200,
   );
@@ -2020,7 +2137,10 @@ async function currentEntitlement(request, env) {
   if (!secret) return jsonResponse({ error: 'server misconfigured' }, 500);
 
   const claims = await readToken(bearerToken(request), secret);
-  if (!claims || claims.kind !== 'sub') return jsonResponse({ error: 'invalid token' }, 401);
+  // A `staker` token is a `sub` that took the stake-unlock path — same receipt, labelled.
+  if (!claims || (claims.kind !== 'sub' && claims.kind !== 'staker')) {
+    return jsonResponse({ error: 'invalid token' }, 401);
+  }
 
   if (Date.now() >= claims.expiresAt) {
     return jsonResponse({ entitled: false, reason: 'expired' }, 200);
@@ -2030,6 +2150,7 @@ async function currentEntitlement(request, env) {
     {
       entitled: true,
       address: normalizeAddress(claims.addressCompact),
+      ...(claims.kind === 'staker' ? { staker: true } : {}),
       ...(isCompAddress(claims.addressCompact, env) ? { comp: true } : {}),
       ...entitlementWindow(claims.expiresAt),
     },
