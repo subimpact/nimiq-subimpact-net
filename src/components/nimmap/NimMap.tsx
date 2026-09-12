@@ -206,6 +206,20 @@ export function NimMap() {
     [model, scanning, depth, runScan],
   )
 
+  // A `?seed=NQ…` link — the explorer's address search, or anyone deep-linking a wallet —
+  // opens the map already scanning that address. Once per mount, so a re-render can never
+  // restart the scan; the ref guard is the whole of the protection.
+  const seeded = useRef(false)
+  useEffect(() => {
+    if (seeded.current) return
+    seeded.current = true
+    const seed = new URLSearchParams(window.location.search).get("seed")
+    if (!seed) return
+    if (isValidAddress(formatAddress(seed))) runScan(seed, DEFAULT_DEPTH)
+    // Deliberately run-once with the mount-time runScan; the ref above owns re-entrancy.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-xl border border-border bg-card/30">

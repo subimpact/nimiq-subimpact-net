@@ -1,0 +1,7 @@
+# Explorer detail pages are client-rendered from the id in the path — a static build
+# cannot enumerate a chain, so every /explorer/block/<id> and /explorer/tx/<hash>
+# serves the page shell (a 200 rewrite keeps the pretty URL). The shell reads the id
+# back out of the pathname and fetches the record from the API worker.
+
+/explorer/block/*  /explorer/block/index.html  200
+/explorer/tx/*     /explorer/tx/index.html     200

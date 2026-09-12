@@ -1,0 +1,58 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import { ExplorerSearch } from '../../components/explorer/ExplorerSearch'
+import { LatestOverview } from '../../components/explorer/LatestOverview'
+
+const title = 'Explorer — every block and transaction on Nimiq'
+const description =
+  'A live view of the Nimiq chain: the newest blocks, the transactions inside them, and a search box for any height, hash or address. Read straight from a public node.'
+---
+
+<Layout title={title} description={description}>
+  <section class="mx-auto w-full max-w-[1600px] px-4 pt-12 pb-24 md:px-8 md:pb-16 xl:px-10">
+    <p class="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">Explorer</p>
+    <h1 class="text-3xl font-bold tracking-tight md:text-4xl">The chain, block by block</h1>
+    <p class="mt-3 max-w-[64ch] text-sm leading-relaxed text-muted-foreground">
+      Nimiq confirms a block roughly every second. This page follows the head as it
+      moves — the newest blocks, the transactions inside them, and a search box that
+      takes a height, a hash, or any address. Everything is read straight from a
+      public node; nothing is indexed or stored.
+    </p>
+
+    <div class="mt-8 max-w-3xl">
+      <ExplorerSearch client:load />
+    </div>
+
+    <div class="mt-8">
+      <LatestOverview client:load />
+    </div>
+
+    <div class="mt-12 grid gap-8 border-t border-border pt-8 md:grid-cols-3">
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Reading it</p>
+        <p class="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted-foreground">
+          Each row in Latest transactions carries the same colour the arrows wear in
+          NimMap: cyan for staking, gold for reward payouts, violet for a message or data
+          payload, and neutral for a plain transfer. The colour is the transaction
+          family, not decoration.
+        </p>
+      </div>
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Blocks</p>
+        <p class="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted-foreground">
+          Click any height for the block's full detail — hash, parent, producer, and
+          every transaction inside. Prev/next arrows walk the chain one block at a time.
+          A producer address opens in NimMap, seeded on that validator.
+        </p>
+      </div>
+      <div>
+        <p class="font-mono text-xs uppercase tracking-[0.18em] text-primary">Follow the money</p>
+        <p class="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted-foreground">
+          Searching an address lands in NimMap, our address mapper, with the wallet as
+          the seed. From any transaction you can jump into the same view — the explorer
+          tells you what happened, NimMap shows you where the money went.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>

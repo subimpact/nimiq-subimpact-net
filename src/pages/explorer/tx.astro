@@ -1,0 +1,19 @@
+---
+import Layout from '../../layouts/Layout.astro'
+import { TxView } from '../../components/explorer/TxView'
+
+const title = 'Transaction — Nimiq Explorer'
+const description =
+  'A single Nimiq transaction: parties, value, fee, confirmations and its block — with one click into NimMap to follow the money.'
+---
+
+<Layout title={title} description={description}>
+  <section class="mx-auto w-full max-w-[1200px] px-4 pt-12 pb-24 md:px-8 md:pb-16 xl:px-10">
+    <div class="mb-6">
+      <a href="/explorer/" class="font-mono text-xs text-muted-foreground transition-colors hover:text-foreground">
+        ← Explorer
+      </a>
+    </div>
+    <TxView client:load />
+  </section>
+</Layout>

@@ -38,6 +38,9 @@ const ALLOWED_ORIGINS = [
   'https://nimiq.subimpact.net',
   'https://nimiq-subimpact-net.pages.dev',
   'http://localhost:4321',
+  // The test suite's preview port. Kept alongside 4321 so a local server on either
+  // port can drive the real API — the e2e suites mock the worker instead.
+  'http://localhost:4331',
 ];
 
 const UPSTREAM = 'https://api.nimiqhub.com';
