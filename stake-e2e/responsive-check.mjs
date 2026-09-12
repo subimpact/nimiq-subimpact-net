@@ -5,7 +5,7 @@
 import { chromium } from '/root/projects/alphaaccess-my/e2e/node_modules/playwright/index.mjs';
 
 const BASE = process.env.BASE || 'http://localhost:4331';
-const PATHS = ['/', '/validators/', '/graph/', '/validators/?view=map'];
+const PATHS = ['/', '/validators/', '/graph/', '/validators/?view=map', '/explorer/', '/explorer/block/?id=61000000', '/explorer/tx/?id=b4875e2a2533e121283b5b7008d5698c4e76e6e9261d2bd56ba4fa9795d6a3a8'];
 const SEED = 'NQ08 ACT8 T0FE PTG8 P5RL H2S3 QGXH V15R NVXY';
 const COUNTERPARTY = 'NQ27 NCB1 3CYU 9P4L EM2V D7L2 28QE 36PA EXB1';
 // `minCanvas` is the NimMap target — /graph/ keeps the near-full-bleed 1920px
@@ -94,6 +94,63 @@ await context.route('https://nimiq-api.subimpact.net/**', (route) => {
   }
   if (url.includes('/api/status')) {
     return route.fulfill({ status: 200, contentType: 'application/json', body: STATUS_BODY });
+  }
+  if (url.includes('/api/blocks')) {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        height: 61000005,
+        fetchedAt: Date.now(),
+        source: 'rpc.nimiqwatch.com',
+        blocks: Array.from({ length: 15 }, (_, i) => ({
+          number: 61000005 - i,
+          hash: 'f'.repeat(63) + (i % 10),
+          parentHash: 'e'.repeat(64),
+          timestamp: Date.now() - i * 60000,
+          size: 793,
+          batch: 965500 + i,
+          epoch: 1342,
+          txCount: 1,
+          producer: SEED,
+          transactions: [
+            { hash: 'b'.repeat(64), blockNumber: 61000005 - i, timestamp: Date.now() - i * 60000, confirmations: i + 3, size: 139, from: SEED, to: COUNTERPARTY, value: 500000, fee: 0, fromType: 0, toType: 0, flags: 0, dataType: null, senderDataType: null },
+          ],
+        })),
+      }),
+    });
+  }
+  if (url.includes('/api/block/')) {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        block: {
+          number: 61000000,
+          hash: 'a'.repeat(64),
+          parentHash: 'b'.repeat(64),
+          timestamp: Date.now() - 300000,
+          size: 793,
+          batch: 965512,
+          epoch: 1342,
+          txCount: 2,
+          producer: SEED,
+          transactions: [
+            { hash: 'b'.repeat(64), blockNumber: 61000000, timestamp: Date.now() - 300000, confirmations: 3, size: 139, from: SEED, to: COUNTERPARTY, value: 500000, fee: 0, fromType: 0, toType: 0, flags: 0, dataType: null, senderDataType: null },
+            { hash: 'c'.repeat(64), blockNumber: 61000000, timestamp: Date.now() - 300000, confirmations: 3, size: 139, from: COUNTERPARTY, to: SEED, value: 12345, fee: 0, fromType: 0, toType: 0, flags: 0, dataType: null, senderDataType: null },
+          ],
+        },
+      }),
+    });
+  }
+  if (url.includes('/api/tx/')) {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        tx: { hash: 'b'.repeat(64), blockNumber: 61000000, timestamp: Date.now() - 300000, confirmations: 3, size: 139, from: SEED, to: COUNTERPARTY, value: 500000, fee: 0, fromType: 0, toType: 0, flags: 0, dataType: null, senderDataType: null },
+      }),
+    });
   }
   const body = url.includes('/api/graph')
     ? GRAPH_BODY
@@ -238,8 +295,8 @@ for (const vp of VIEWPORTS) {
       const bar = page.locator('nav.fixed.bottom-0, nav[class*="fixed"][class*="bottom-0"]').first();
       const barBox = await bar.boundingBox();
       assert(
-        barBox !== null && barBox.width === vp.width && (await bar.locator('a').count()) === 5,
-        `${path}: mobile bottom bar intact (${barBox ? Math.round(barBox.width) : 'missing'}px wide, 5 links)`,
+        barBox !== null && barBox.width === vp.width && (await bar.locator('a').count()) === 6,
+        `${path}: mobile bottom bar intact (${barBox ? Math.round(barBox.width) : 'missing'}px wide, 6 links)`,
       );
     }
   }

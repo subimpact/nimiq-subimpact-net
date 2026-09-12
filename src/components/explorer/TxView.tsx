@@ -120,7 +120,7 @@ export function TxView() {
             href={`/explorer/block/${tx.blockNumber}`}
             className="text-primary hover:underline"
           >
-            #{tx.blockNumber.toLocaleString("en-US")}
+            {typeof tx.blockNumber === "number" ? `#${tx.blockNumber.toLocaleString("en-US")}` : "—"}
           </a>
           {typeof tx.confirmations === "number" && (
             <span className="ml-2 text-muted-foreground">
