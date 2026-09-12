@@ -2859,5 +2859,257 @@ await test('upstream throw/timeout -> 502', async () => {
   assertEqual((await res.json()).error, 'upstream', 'body.error');
 });
 
+// ===========================================================================
+// Explorer: /api/blocks | /api/block/:id | /api/tx/:hash | /api/search
+// ===========================================================================
+
+function blockHashFor(number) {
+  return number.toString(16).padStart(8, '0') + 'd'.repeat(56);
+}
+
+function explorerTx(overrides = {}) {
+  return {
+    hash: HISTORY_HASH_1,
+    blockNumber: 1000,
+    timestamp: 1789000000000,
+    confirmations: 12,
+    size: 140,
+    from: STAKER_A1,
+    fromType: 0,
+    to: STAKER_A2,
+    toType: 0,
+    value: 4200000,
+    fee: 0,
+    senderData: '',
+    recipientData: '',
+    ...overrides,
+  };
+}
+
+function blockFixture(number, txs) {
+  const block = {
+    number,
+    hash: blockHashFor(number),
+    parentHash: blockHashFor(number - 1),
+    timestamp: 1789000000000 - (1000 - number) * 1000,
+    size: 700,
+    batch: 120,
+    epoch: 1340,
+    version: 2,
+    producer: { slotNumber: 3, validator: VALIDATOR_A },
+  };
+  if (txs !== undefined) block.transactions = txs;
+  return block;
+}
+
+/** The node's answers for the explorer routes. `opts.head` moves the chain head. */
+function explorerUpstream(opts = {}) {
+  const head = opts.head ?? 1000;
+  return (url, init) => {
+    if (url !== RPC_URL) return new Response('not found', { status: 404 });
+    if (opts.throws) throw new Error('connection refused');
+    if (opts.httpFail) return new Response('unavailable', { status: 503 });
+    const sent = JSON.parse(init.body);
+    switch (sent.method) {
+      case 'getBlockNumber':
+        return jsonUpstream({ jsonrpc: '2.0', result: { data: head, metadata: null }, id: 1 });
+      case 'getBlockByNumber': {
+        const [number, withTxs] = sent.params;
+        if (number > head || number < 0) {
+          return jsonUpstream({
+            jsonrpc: '2.0',
+            error: { code: -32602, message: 'Block not found' },
+            id: 1,
+          });
+        }
+        const txs =
+          number === 1000
+            ? [explorerTx(), explorerTx({ hash: HISTORY_HASH_2, value: 99 })]
+            : number === 999
+              ? [explorerTx({ hash: HISTORY_HASH_2, blockNumber: 999 })]
+              : [];
+        return jsonUpstream({
+          jsonrpc: '2.0',
+          result: { data: blockFixture(number, withTxs ? txs : undefined), metadata: null },
+          id: 1,
+        });
+      }
+      case 'getBlockByHash': {
+        if (sent.params[0] !== blockHashFor(1000).toLowerCase()) {
+          return jsonUpstream({
+            jsonrpc: '2.0',
+            error: { code: -32602, message: 'Block not found' },
+            id: 1,
+          });
+        }
+        const txs = sent.params[1] ? [explorerTx()] : undefined;
+        return jsonUpstream({
+          jsonrpc: '2.0',
+          result: { data: blockFixture(1000, txs), metadata: null },
+          id: 1,
+        });
+      }
+      case 'getTransactionByHash': {
+        if (sent.params[0] !== HISTORY_HASH_1) {
+          return jsonUpstream({
+            jsonrpc: '2.0',
+            error: { code: -32602, message: 'Transaction not found' },
+            id: 1,
+          });
+        }
+        return jsonUpstream({ jsonrpc: '2.0', result: { data: explorerTx(), metadata: null }, id: 1 });
+      }
+      default:
+        return new Response('not found', { status: 404 });
+    }
+  };
+}
+
+/** The params of the last RPC call this invocation made for `method`, or null. */
+function lastRpcParams(method) {
+  for (let i = upstreamCalls.length - 1; i >= 0; i--) {
+    if (upstreamCalls[i].url !== RPC_URL) continue;
+    const sent = JSON.parse(upstreamCalls[i].init.body);
+    if (sent.method === method) return sent.params;
+  }
+  return null;
+}
+
+await test('explorer: /api/blocks lists the head first, with transactions and a height', async () => {
+  upstreamHandler = explorerUpstream();
+  const res = await call('/api/blocks?limit=3');
+  assertEqual(res.status, 200, 'status');
+  const body = await res.json();
+  assertEqual(body.height, 1000, 'height');
+  assertEqual(body.blocks.length, 3, 'blocks');
+  assertEqual(body.blocks[0].number, 1000, 'first block number');
+  assertEqual(body.blocks[0].hash, blockHashFor(1000), 'first block hash');
+  assertEqual(body.blocks[0].parentHash, blockHashFor(999), 'first block parentHash');
+  assertEqual(body.blocks[0].txCount, 2, 'first block txCount');
+  assertEqual(body.blocks[1].number, 999, 'second block number');
+  assertEqual(body.blocks[1].txCount, 1, 'second block txCount');
+  assertEqual(body.blocks[2].txCount, 0, 'third block txCount');
+  assertEqual(body.blocks[0].producer, VALIDATOR_A, 'producer');
+  const tx = body.blocks[0].transactions[0];
+  assertEqual(tx.hash, HISTORY_HASH_1, 'tx hash');
+  assertEqual(tx.value, 4200000, 'tx value');
+  assertEqual(tx.fromType, 0, 'tx fromType');
+  assertEqual(tx.dataType, null, 'tx dataType (no payload)');
+});
+
+await test('explorer: /api/blocks rejects limits it cannot honour', async () => {
+  upstreamHandler = explorerUpstream();
+  for (const bad of ['0', '26', 'abc', '-1']) {
+    const res = await call(`/api/blocks?limit=${encodeURIComponent(bad)}`);
+    assertEqual(res.status, 400, `limit=${bad} status`);
+    assertEqual((await res.json()).error, 'invalid limit', `limit=${bad} error`);
+  }
+});
+
+await test('explorer: a warm blocks cache answers without touching the node', async () => {
+  upstreamHandler = explorerUpstream();
+  await call('/api/blocks?limit=2');
+  const before = upstreamCalls.length;
+  const res = await call('/api/blocks?limit=2');
+  assertEqual(res.status, 200, 'status');
+  assertEqual(upstreamCalls.length - before, 0, 'upstream fetches on the second call');
+});
+
+await test('explorer: an unreachable node is a 502, not an empty list', async () => {
+  upstreamHandler = explorerUpstream({ throws: true });
+  const res = await call('/api/blocks?limit=2');
+  assertEqual(res.status, 502, 'status');
+  assertEqual((await res.json()).error, 'upstream', 'error');
+});
+
+await test('explorer: /api/block/:number carries the block and its transactions', async () => {
+  upstreamHandler = explorerUpstream();
+  const res = await call('/api/block/1000');
+  assertEqual(res.status, 200, 'status');
+  const { block } = await res.json();
+  assertEqual(block.number, 1000, 'number');
+  assertEqual(block.hash, blockHashFor(1000), 'hash');
+  assertEqual(block.batch, 120, 'batch');
+  assertEqual(block.epoch, 1340, 'epoch');
+  assertEqual(block.producer, VALIDATOR_A, 'producer');
+  assertEqual(block.txCount, 2, 'txCount');
+  assertEqual(block.transactions.length, 2, 'transactions');
+  assertEqual(block.transactions[1].value, 99, 'second tx value');
+});
+
+await test('explorer: /api/block/:hash lower-cases the hash before the node sees it', async () => {
+  upstreamHandler = explorerUpstream();
+  const upper = blockHashFor(1000).toUpperCase();
+  const res = await call(`/api/block/${upper}`);
+  assertEqual(res.status, 200, 'status');
+  assertEqual((await res.json()).block.number, 1000, 'number');
+  assertEqual(lastRpcParams('getBlockByHash')[0], blockHashFor(1000), 'hash param (lowercase)');
+});
+
+await test('explorer: a height beyond the head is a 404 and garbage is a 400', async () => {
+  upstreamHandler = explorerUpstream();
+  const missing = await call('/api/block/9999');
+  assertEqual(missing.status, 404, 'unknown block status');
+  assertEqual((await missing.json()).error, 'not found', 'unknown block error');
+  const invalid = await call('/api/block/not-a-block');
+  assertEqual(invalid.status, 400, 'invalid id status');
+  assertEqual((await invalid.json()).error, 'invalid block', 'invalid id error');
+});
+
+await test('explorer: /api/tx/:hash returns a normalized transaction', async () => {
+  upstreamHandler = explorerUpstream();
+  const res = await call(`/api/tx/${HISTORY_HASH_1}`);
+  assertEqual(res.status, 200, 'status');
+  const { tx } = await res.json();
+  assertEqual(tx.hash, HISTORY_HASH_1, 'hash');
+  assertEqual(tx.blockNumber, 1000, 'blockNumber');
+  assertEqual(tx.confirmations, 12, 'confirmations');
+  assertEqual(tx.from, STAKER_A1, 'from');
+  assertEqual(tx.to, STAKER_A2, 'to');
+  assertEqual(tx.fee, 0, 'fee');
+});
+
+await test('explorer: an unknown transaction is a 404, a malformed hash a 400', async () => {
+  upstreamHandler = explorerUpstream();
+  const missing = await call(`/api/tx/${HISTORY_HASH_2}`);
+  assertEqual(missing.status, 404, 'unknown tx status');
+  const invalid = await call('/api/tx/short');
+  assertEqual(invalid.status, 400, 'invalid tx status');
+  assertEqual((await invalid.json()).error, 'invalid transaction', 'invalid tx error');
+});
+
+await test('explorer: /api/search resolves numbers, block hashes, tx hashes and addresses', async () => {
+  upstreamHandler = explorerUpstream();
+
+  const asNumber = await call('/api/search?q=999');
+  assertEqual(asNumber.status, 200, 'number status');
+  assertEqual((await asNumber.json()).type, 'block', 'number type');
+
+  const asBlockHash = await call(`/api/search?q=${blockHashFor(1000)}`);
+  const blockHashBody = await asBlockHash.json();
+  assertEqual(blockHashBody.type, 'block', 'block-hash type');
+  assertEqual(blockHashBody.hash, blockHashFor(1000), 'block-hash value');
+
+  const asTx = await call(`/api/search?q=${HISTORY_HASH_1}`);
+  const txBody = await asTx.json();
+  assertEqual(txBody.type, 'tx', 'tx-hash type');
+  assertEqual(txBody.hash, HISTORY_HASH_1, 'tx-hash value');
+
+  const asAddress = await call(`/api/search?q=${ADDRESS_COMPACT}`);
+  assertEqual(asAddress.status, 200, 'address status');
+  const addressBody = await asAddress.json();
+  assertEqual(addressBody.type, 'address', 'address type');
+  assertEqual(addressBody.address, ADDRESS, 'address canonical form');
+
+  const nothing = await call(`/api/search?q=${HISTORY_HASH_2}`);
+  assertEqual(nothing.status, 404, 'unknown 64-hex status');
+
+  const garbage = await call('/api/search?q=hello%20world');
+  assertEqual(garbage.status, 404, 'garbage status');
+
+  const unknownHeight = await call('/api/search?q=99999');
+  assertEqual(unknownHeight.status, 404, 'unknown height status');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

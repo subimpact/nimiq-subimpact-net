@@ -124,6 +124,20 @@ const HISTORY_DEFAULT_MAX = 20;
 const HISTORY_MAX = 50;
 const HISTORY_CACHE_TTL = 60;
 
+// --- block explorer ---------------------------------------------------------
+//
+// The same node that answers history answers blocks and single transactions, so the
+// explorer routes read the node directly rather than NimiqHub. Blocks are chained at
+// ~1/second, so the head list is cached for seconds — long enough to absorb a burst of
+// readers, short enough that the page follows the chain. A sealed block and a mined
+// transaction never change, so their entries get minutes.
+
+const BLOCKS_DEFAULT_LIMIT = 15;
+const BLOCKS_MAX_LIMIT = 25;
+const BLOCKS_CACHE_TTL = 20;
+const BLOCK_CACHE_TTL = 600;
+const TX_CACHE_TTL = 300;
+
 const LUNA_PER_NIM = 100000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -340,6 +354,22 @@ export default {
       // Cache under the normalized address so spacing/case variants share one entry.
       const cacheUrl = new URL(`/api/${segments[1]}/${encodeURIComponent(address)}`, url.origin);
       return withHeaders(await proxy(ctx, cacheUrl, path), cors);
+    }
+
+    if (segments.length === 2 && segments[1] === 'blocks') {
+      return withHeaders(await latestBlocks(ctx, url), cors);
+    }
+
+    if (segments.length === 3 && segments[1] === 'block') {
+      return withHeaders(await blockDetail(ctx, url, decodeSegment(segments[2])), cors);
+    }
+
+    if (segments.length === 3 && segments[1] === 'tx') {
+      return withHeaders(await transactionDetail(ctx, url, decodeSegment(segments[2])), cors);
+    }
+
+    if (segments.length === 2 && segments[1] === 'search') {
+      return withHeaders(await searchChain(url), cors);
     }
 
     return withHeaders(jsonResponse({ error: 'not found' }, 404), cors);
@@ -1154,6 +1184,226 @@ async function addressHistory(ctx, url, address) {
   }
 
   return response;
+}
+
+/**
+ * One JSON-RPC call to the public node. The node speaks POST only and answers a
+ * rejected request with HTTP 200 and the detail in `error`, so both layers are checked
+ * here. Every caller gets the same two-way answer: `ok` for whether the node answered,
+ * `data` for what it answered with. `data: null` with `ok: true` is the chain saying
+ * "no such block or transaction" — the routes below turn that into a 404, never into
+ * an upstream error.
+ */
+async function rpcCall(method, params) {
+  let payload;
+  try {
+    const response = await fetch(RPC_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': USER_AGENT,
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (!response.ok) return { ok: false, data: null };
+    payload = await response.json();
+  } catch {
+    return { ok: false, data: null };
+  }
+  if (payload && typeof payload === 'object' && payload.error) {
+    return { ok: true, data: null };
+  }
+  const data = payload && payload.result ? (payload.result.data ?? null) : null;
+  return { ok: true, data };
+}
+
+/**
+ * A block as the explorer draws it. `number`/`hash` identify it; `transactions` are
+ * normalized exactly like history rows, so the feed, the block page and NimMap all
+ * speak one shape — and the tx-type bytes that colour NimMap's edges colour the
+ * explorer too. A row without a hash or number is not a block: it returns null and the
+ * caller drops it.
+ */
+function normalizeBlock(row) {
+  if (!row || typeof row !== 'object') return null;
+  const hash = typeof row.hash === 'string' ? row.hash : '';
+  const number = toNumber(row.number);
+  if (!hash || !number) return null;
+  const transactions = Array.isArray(row.transactions)
+    ? row.transactions.map(normalizeTransaction).filter(Boolean)
+    : [];
+  const producer = row.producer && typeof row.producer === 'object' ? row.producer : null;
+  return {
+    number,
+    hash,
+    parentHash: typeof row.parentHash === 'string' ? row.parentHash : null,
+    timestamp: toNumber(row.timestamp),
+    size: toNumber(row.size),
+    batch: toNumber(row.batch),
+    epoch: toNumber(row.epoch),
+    producer: producer && typeof producer.validator === 'string' ? producer.validator : null,
+    txCount: transactions.length,
+    transactions,
+  };
+}
+
+/** `?limit=` — an integer in 1..BLOCKS_MAX_LIMIT, or absent for the default. */
+function parseBlocksLimit(raw) {
+  if (raw === null || raw === '') return BLOCKS_DEFAULT_LIMIT;
+  if (!/^\d+$/.test(raw)) return null;
+  const limit = Number(raw);
+  return limit >= 1 && limit <= BLOCKS_MAX_LIMIT ? limit : null;
+}
+
+/** The chain head plus its last `limit` blocks, newest first, transactions inline. */
+async function latestBlocks(ctx, url) {
+  const limit = parseBlocksLimit(url.searchParams.get('limit'));
+  if (limit === null) return jsonResponse({ error: 'invalid limit' }, 400);
+
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(new URL(`/api/blocks?limit=${limit}`, url.origin).toString(), {
+    method: 'GET',
+  });
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  const head = await rpcCall('getBlockNumber', []);
+  if (!head.ok || typeof head.data !== 'number') {
+    return jsonResponse({ error: 'upstream' }, 502);
+  }
+
+  const numbers = [];
+  for (let offset = 0; offset < limit && head.data - offset >= 0; offset++) {
+    numbers.push(head.data - offset);
+  }
+  const rows = await mapWithConcurrency(numbers, 6, (number) =>
+    rpcCall('getBlockByNumber', [number, true]),
+  );
+  const blocks = rows
+    .filter((row) => row.ok && row.data)
+    .map((row) => normalizeBlock(row.data))
+    .filter(Boolean);
+
+  const response = jsonResponse(
+    { height: head.data, fetchedAt: Date.now(), source: 'rpc.nimiqwatch.com', blocks },
+    200,
+    cacheControl(BLOCKS_CACHE_TTL),
+  );
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+  return response;
+}
+
+/** One block by height or hash, transactions inline. */
+async function blockDetail(ctx, url, rawId) {
+  const id = typeof rawId === 'string' ? rawId.trim() : '';
+  const isNumber = /^\d+$/.test(id);
+  const hash = id.toLowerCase();
+  if (!isNumber && !TX_HASH_RE.test(hash)) {
+    return jsonResponse({ error: 'invalid block' }, 400);
+  }
+
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(
+    new URL(`/api/block/${encodeURIComponent(isNumber ? id : hash)}`, url.origin).toString(),
+    { method: 'GET' },
+  );
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  const call = isNumber
+    ? await rpcCall('getBlockByNumber', [Number(id), true])
+    : await rpcCall('getBlockByHash', [hash, true]);
+  if (!call.ok) return jsonResponse({ error: 'upstream' }, 502);
+
+  const block = call.data ? normalizeBlock(call.data) : null;
+  if (!block) return jsonResponse({ error: 'not found' }, 404);
+
+  const response = jsonResponse({ block }, 200, cacheControl(BLOCK_CACHE_TTL));
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+  return response;
+}
+
+/** One transaction by hash. */
+async function transactionDetail(ctx, url, rawHash) {
+  const hash = typeof rawHash === 'string' ? rawHash.trim().toLowerCase() : '';
+  if (!TX_HASH_RE.test(hash)) {
+    return jsonResponse({ error: 'invalid transaction' }, 400);
+  }
+
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(new URL(`/api/tx/${hash}`, url.origin).toString(), {
+    method: 'GET',
+  });
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+
+  const call = await rpcCall('getTransactionByHash', [hash]);
+  if (!call.ok) return jsonResponse({ error: 'upstream' }, 502);
+
+  const tx = call.data ? normalizeTransaction(call.data) : null;
+  if (!tx) return jsonResponse({ error: 'not found' }, 404);
+
+  const response = jsonResponse({ tx }, 200, cacheControl(TX_CACHE_TTL));
+  if (cache) {
+    const put = cache.put(cacheKey, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put);
+    else await put;
+  }
+  return response;
+}
+
+/**
+ * "What is this?" — the one box the explorer's search field hands its text to.
+ *
+ * A bare number is a block height; 64 hex characters may be a block hash or a
+ * transaction hash (both are tested, block first); an NQ address is accepted with or
+ * without spacing and answered as a canonical address — the client links it into
+ * NimMap or the account endpoints. Anything else is a 404, which the search box
+ * renders as "nothing matches".
+ */
+async function searchChain(url) {
+  const q = (url.searchParams.get('q') || '').trim();
+  if (!q) return jsonResponse({ error: 'invalid query' }, 400);
+
+  if (/^\d{1,10}$/.test(q)) {
+    const call = await rpcCall('getBlockByNumber', [Number(q), false]);
+    if (!call.ok) return jsonResponse({ error: 'upstream' }, 502);
+    if (call.data) return jsonResponse({ type: 'block', number: Number(q) });
+    return jsonResponse({ error: 'not found' }, 404);
+  }
+
+  const lower = q.toLowerCase();
+  if (TX_HASH_RE.test(lower)) {
+    const [asBlock, asTx] = await Promise.all([
+      rpcCall('getBlockByHash', [lower, false]),
+      rpcCall('getTransactionByHash', [lower]),
+    ]);
+    if (!asBlock.ok || !asTx.ok) return jsonResponse({ error: 'upstream' }, 502);
+    if (asBlock.data) return jsonResponse({ type: 'block', hash: lower });
+    if (asTx.data) return jsonResponse({ type: 'tx', hash: lower });
+    return jsonResponse({ error: 'not found' }, 404);
+  }
+
+  const address = normalizeAddress(q);
+  if (address) return jsonResponse({ type: 'address', address });
+
+  return jsonResponse({ error: 'not found' }, 404);
 }
 
 /**
