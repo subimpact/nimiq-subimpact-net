@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { formatFiat, useCurrency, useNimRate } from "@/lib/currency"
 import { ExpandableAddress } from "@/components/explorer/ExpandableAddress"
 
 export interface Validator {
@@ -92,7 +93,7 @@ function ElectedChip({ state, epoch }: { state: ElectedState; epoch?: number }) 
   )
 }
 
-const COLUMNS: { key: SortKey; label: string; numeric?: boolean }[] = [
+const COLUMNS: { key: SortKey; label: string; numeric?: boolean; hint?: string }[] = [
   { key: "name", label: "Validator" },
   { key: "elected", label: "Elected" },
   { key: "fee", label: "Fee", numeric: true },
@@ -101,7 +102,12 @@ const COLUMNS: { key: SortKey; label: string; numeric?: boolean }[] = [
   { key: "reliability", label: "Reliability", numeric: true },
   { key: "dominance", label: "Dominance", numeric: true },
   { key: "stakers", label: "Stakers", numeric: true },
-  { key: "balance", label: "Self-stake", numeric: true },
+  {
+    key: "balance",
+    label: "Stake",
+    numeric: true,
+    hint: "Total NIM staked with this validator — its own stake plus everything delegated to it",
+  },
 ]
 
 export function ValidatorTable({ initial }: { initial: Validator[] }) {
@@ -111,6 +117,10 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
   const [status, setStatus] = useState<"live" | "snapshot" | "error">("snapshot")
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
   const [activeSet, setActiveSet] = useState<Set<string> | null>(null)
+
+  // The display currency and its NIM rate, shared with the page's currency bar.
+  const [currency] = useCurrency()
+  const { rate } = useNimRate(currency)
 
   useEffect(() => {
     let cancelled = false
@@ -218,6 +228,7 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
                 <TableHead key={col.key} className={cn("px-4 py-3", col.numeric && "text-right")}>
                   <button
                     onClick={() => toggleSort(col.key)}
+                    title={col.hint}
                     className={cn(
                       "inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide transition-colors hover:text-foreground",
                       sortKey === col.key ? "text-primary" : "text-muted-foreground"
@@ -285,6 +296,11 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
                   </TableCell>
                   <TableCell className="px-4 py-3 text-right font-mono tabular-nums">
                     {nim(v.balance)}
+                    {rate && typeof v.balance === "number" && v.balance > 0 ? (
+                      <span className="block text-[11px] text-muted-foreground" data-stake-fiat="">
+                        ≈ {formatFiat((v.balance / 1e5) * rate, currency)}
+                      </span>
+                    ) : null}
                   </TableCell>
                 </TableRow>
               )

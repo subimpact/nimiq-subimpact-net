@@ -2,6 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import snapshot from '../../data/validators.json';
 import { NetworkStats } from '../../components/NetworkStats';
+import { CurrencySwitcher } from '../../components/CurrencySwitcher';
 import { ValidatorsPanel } from '../../components/ValidatorsPanel';
 
 const totalStaked = snapshot.validators.reduce((s, v) => s + (v.balance || 0), 0);
@@ -33,7 +34,11 @@ function fmtNim(luna: number): string {
       />
     </div>
 
-    <div class="mt-10">
+    <div class="mt-8">
+      <CurrencySwitcher totalStakedLuna={totalStaked} client:load />
+    </div>
+
+    <div class="mt-6">
       <ValidatorsPanel initial={snapshot.validators} client:load />
     </div>
   </section>

@@ -192,6 +192,23 @@ await context.route('https://validators-api-main.je-cf9.workers.dev/**', (route)
   }),
 );
 
+// Fiat rates come straight from CoinGecko in the browser. Mocked for every
+// offered currency so the currency bar and the "≈" cells have numbers.
+const FIAT_CODES = [
+  'aed', 'ars', 'aud', 'brl', 'cad', 'chf', 'clp', 'cny', 'czk', 'dkk', 'eur', 'gbp', 'hkd',
+  'huf', 'idr', 'ils', 'inr', 'jpy', 'krw', 'mxn', 'myr', 'ngn', 'nok', 'nzd', 'php', 'pkr',
+  'pln', 'rub', 'sek', 'sgd', 'thb', 'try', 'twd', 'uah', 'usd', 'vnd', 'zar',
+];
+await context.route('https://api.coingecko.com/**', (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      'nimiq-2': Object.fromEntries(FIAT_CODES.map((code) => [code, code === 'myr' ? 0.0016 : 0.00039])),
+    }),
+  }),
+);
+
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
@@ -419,6 +436,27 @@ await page.locator('[data-elected-chip="inactive"]').waitFor({ timeout: 10000 })
 assert((await page.locator('[data-elected-chip]').count()) === 12, 'every listed validator carries a status chip');
 assert((await page.locator('[data-elected-chip="elected"]').count()) === 11, 'validators in the active set read Elected');
 assert((await page.locator('[data-elected-chip="inactive"]').count()) === 1, 'a validator outside the active set reads Inactive');
+
+// Fiat evaluation: the currency bar knows the NIM rate, every stake cell gets an
+// "≈" value priced in the chosen currency, and switching re-prices + persists.
+await page.goto(BASE + '/validators/', { waitUntil: 'load' });
+await page.locator('[data-stake-fiat]').first().waitFor({ timeout: 10000 });
+const usdCell = (await page.locator('[data-stake-fiat]').first().innerText()).trim();
+assert(usdCell.startsWith('≈ $'), `a stake cell is evaluated in USD by default (got "${usdCell}")`);
+assert(
+  (await page.locator('[data-total-fiat]').innerText()).includes('Total staked ≈ $'),
+  'the bar prices the whole book of stake',
+);
+await page.locator('[data-currency-switcher]').click();
+await page.locator('[data-currency-tile="myr"]').click();
+const myrCell = (await page.locator('[data-stake-fiat]').first().innerText()).trim();
+assert(myrCell.startsWith('≈ RM'), `the stake cell re-prices to MYR after the switch (got "${myrCell}")`);
+assert(
+  (await page.locator('[data-rate-line]').innerText()).includes('RM'),
+  'the rate line follows the currency',
+);
+const savedCurrency = await page.evaluate(() => window.localStorage.getItem('nimiq:currency'));
+assert(savedCurrency === 'myr', `the choice is remembered (got ${savedCurrency})`);
 
 // Shell width on desktop: the wide shells actually take the screen.
 await page.setViewportSize({ width: 1920, height: 1080 });
