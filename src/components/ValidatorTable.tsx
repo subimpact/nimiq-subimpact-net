@@ -174,7 +174,7 @@ export function ValidatorTable({ initial }: { initial: Validator[] }) {
                           {v.name}
                           {isImpact && (
                             <Badge variant="outline" className="ml-2 border-primary/40 text-primary">
-                              you
+                              us
                             </Badge>
                           )}
                         </p>
